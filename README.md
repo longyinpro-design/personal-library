@@ -1,6 +1,21 @@
 # 个人资料库
 
+[![CI](https://github.com/longyinpro-design/personal-library/actions/workflows/ci.yml/badge.svg)](https://github.com/longyinpro-design/personal-library/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/longyinpro-design/personal-library?display_name=tag)](https://github.com/longyinpro-design/personal-library/releases)
+
 原生 macOS 个人资料管理 App，使用 SwiftUI、SQLite 和系统预览服务。资料保存在本机，无账户或云服务；MarkdownUI 随 App 编译打包，无需另外安装阅读工具。
+
+## 下载
+
+从 [Releases](https://github.com/longyinpro-design/personal-library/releases) 下载最新的 `PersonalLibrary-*-macos-arm64.dmg` 和对应的 `.sha256` 校验文件，两者放在同一目录后执行：
+
+```sh
+shasum -a 256 -c PersonalLibrary-*.dmg.sha256
+```
+
+打开 DMG，将「个人资料库.app」拖入 Applications。当前提供 Apple 芯片（arm64）构建，需要 macOS 14 或更高版本。
+
+构建使用 ad-hoc 签名，未经过 Apple 公证。首次启动如提示「无法验证开发者」，请右键点击 App 选择「打开」，或执行 `xattr -dr com.apple.quarantine "/Applications/个人资料库.app"`。
 
 ## 功能
 
@@ -44,7 +59,24 @@ Markdown 中的 `文件路径:行号` 和 `文件路径:行号:列号` 可打开
 
 在部分 Command Line Tools 组合下，脚本会加载已安装 Xcode 的 SwiftUI 宏插件；若插件不存在会明确失败。
 
-这是 ad-hoc 签名的开发构建，未做发行签名、公证或安装到 Applications。
+本地脚本产出的是 ad-hoc 签名的开发构建，不会安装到 Applications。嵌套沙箱环境（如部分 CI 或 agent 容器）若禁止 SwiftPM 自身的沙箱，可用 `PERSONAL_LIBRARY_SWIFTPM_SANDBOX=0` 关闭它。
+
+## 发布
+
+推送 `v*` 标签会触发 Release 工作流：构建 `.app`、打包 DMG、生成 SHA-256，并创建附带这两个文件的 GitHub Release。
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+也可以本地打包：
+
+```sh
+./script/package_dmg.sh 0.1.0
+```
+
+产物位于 `dist/`，版本号也可通过 `PERSONAL_LIBRARY_VERSION` 指定。
 
 ## 数据与备份
 
@@ -91,6 +123,9 @@ Markdown 配图后台解码，展示缩略图最长边 2,048 像素；每个配�
 - `Sources/PersonalLibrary`：App 生命周期、界面状态、三栏视图、编辑器与预览。
 - `Tests/`：LibraryCore 与 App 层自动化测试。
 - `script/build_and_run.sh`：构建、打包、启动入口；可选外置存储路由。
+- `script/package_dmg.sh`：生成 DMG 与 SHA-256 校验文件。
+- `.github/workflows/ci.yml`：push 与 PR 的构建、测试工作流。
+- `.github/workflows/release.yml`：`v*` 标签构建 DMG 并发布 Release。
 - `docs/third-party-notices.md`：第三方依赖与素材许可。
 
 ## 设计参考

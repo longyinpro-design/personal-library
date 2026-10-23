@@ -16,7 +16,14 @@ fi
 
 cd "$PROJECT_DIR"
 BUILD_ROOT="${AGENT_BUILD_ROOT:-$PROJECT_DIR/.build}"
+VERSION="${PERSONAL_LIBRARY_VERSION:-0.1.0}"
+BUILD_NUMBER="${PERSONAL_LIBRARY_BUILD:-2}"
 SWIFT_OPTIONS=()
+# Some nested sandboxes (agent harnesses, CI containers) reject SwiftPM's own
+# sandbox-exec calls. Opt out explicitly when the outer sandbox already covers us.
+if [[ "${PERSONAL_LIBRARY_SWIFTPM_SANDBOX:-1}" == "0" ]]; then
+  SWIFT_OPTIONS+=(--disable-sandbox)
+fi
 if [[ -n "${AGENT_SWIFT_SCRATCH_PATH:-}" ]]; then
   export CLANG_MODULE_CACHE_PATH="$AGENT_BUILD_ROOT/clang-module-cache"
   export SWIFTPM_MODULECACHE_OVERRIDE="$AGENT_BUILD_ROOT/swift-module-cache"
@@ -77,7 +84,7 @@ icon_512x512 512
 icon_512x512@2x 1024
 ICONS
 /usr/bin/iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
+cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -87,8 +94,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>个人资料库</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>${VERSION}</string>
+<key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHighResolutionCapable</key><true/>

@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build DMG and publish release
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v*) version="${TAG#v}" ;;
+            *)
+              echo "release tags must start with 'v' (got '$TAG')" >&2
+              exit 1
+              ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building 个人资料库 v$version"
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Build app bundle
+        env:
+          PERSONAL_LIBRARY_VERSION: ${{ steps.version.outputs.version }}
+        run: ./script/build_and_run.sh --build
+
+      - name: Package DMG and checksum
+        env:
+          PERSONAL_LIBRARY_VERSION: ${{ steps.version.outputs.version }}
+        run: ./script/package_dmg.sh --skip-build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PersonalLibrary-${{ steps.version.outputs.version }}
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish GitHub release
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          notes="$(mktemp)"
+          cat .github/release-header.md > "$notes"
+          if ! gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$TAG" \
+              -f target_commitish="$GITHUB_SHA" \
+              --jq .body >> "$notes"; then
+            printf '\n**完整变更**：https://github.com/%s/commits/%s\n' \
+              "$GITHUB_REPOSITORY" "$TAG" >> "$notes"
+          fi
+
+          assets=(dist/*.dmg dist/*.sha256)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" \
+              --title "个人资料库 v$version" \
+              --notes-file "$notes"
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --verify-tag \
+              --title "个人资料库 v$version" \
+              --notes-file "$notes"
+          fi
+
+      - name: Write job summary
+        run: |
+          {
+            echo "### 个人资料库 v${{ steps.version.outputs.version }}"
+            echo
+            echo '```'
+            cat dist/*.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
