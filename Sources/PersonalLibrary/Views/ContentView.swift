@@ -43,9 +43,13 @@ struct ContentView: View {
                 } label: { Label("更多新建", systemImage: "plus") }
                     .disabled(!canCreate)
             }
+            // ToolbarSpacer 只在 macOS 26 SDK（Swift 6.2 / Xcode 26）里存在；
+            // 用编译期条件包住，才能在 Xcode 16 的 macOS 15 SDK 上继续构建。
+            #if compiler(>=6.2)
             if #available(macOS 26.0, *) {
                 ToolbarSpacer(.fixed, placement: .primaryAction)
             }
+            #endif
         }
         .overlay {
             if dropTarget {
