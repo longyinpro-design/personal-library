@@ -65,6 +65,18 @@ struct ContentView: View {
         .alert("操作未完成", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("好", role: .cancel) { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
+        .confirmationDialog("删除所选资料？",
+                            isPresented: Binding(get: { !store.pendingDeletion.isEmpty },
+                                                 set: { if !$0 { store.cancelDelete() } }),
+                            titleVisibility: .visible) {
+            Button("删除 \(store.pendingDeletion.count) 项", role: .destructive) {
+                let ids = store.pendingDeletion
+                Task { await store.confirmDelete(ids) }
+            }
+            Button("取消", role: .cancel) { store.cancelDelete() }
+        } message: {
+            Text("只删除资料库内的副本与配图，原始文件仍保留在原位置。此操作无法撤销。")
+        }
         .onChange(of: store.focusSearch) { _, _ in
             searchPresented = true
             searchFocused = true

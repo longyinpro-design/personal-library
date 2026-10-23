@@ -69,6 +69,12 @@ public struct ImportReport: Sendable {
     public var warnings: [String] = []
 }
 
+public struct LibraryDeletionReport: Sendable {
+    public var deleted = 0
+    public var warnings: [String] = []
+    public init() {}
+}
+
 public struct MarkdownImageCopyReport: Sendable {
     public var references = 0
     public var copied = 0

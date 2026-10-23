@@ -8,7 +8,9 @@ struct DetailView: View {
     @ViewState<Bool> private var showSystemPreview = false
     var body: some View {
         VStack(spacing: 0) {
-            if let item = store.selectedItem, store.scope != .history {
+            if store.scope != .history, store.selection.count > 1 {
+                MultiSelectionDetail(store: store)
+            } else if let item = store.selectedItem, store.scope != .history {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 22) {
@@ -156,6 +158,45 @@ private struct SystemPreview: NSViewRepresentable {
     static func dismantleNSView(_ nsView: QLPreviewView, coordinator: ()) { nsView.close() }
 }
 
+
+private struct MultiSelectionDetail: View {
+    @ObservedObject var store: LibraryStore
+
+    var body: some View {
+        let items = store.items(for: store.selection)
+        let allFavorite = !items.isEmpty && items.allSatisfy(\.favorite)
+        VStack(spacing: 16) {
+            Image(systemName: "square.stack.3d.up")
+                .font(.system(size: 42, weight: .light)).foregroundStyle(.secondary)
+            Text("已选择 \(store.selection.count) 项资料").font(.title3.weight(.semibold))
+            Text("可以批量收藏、整理归类，或删除资料库中的副本。")
+                .font(.callout).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Button { store.setFavorite(store.selection, value: !allFavorite) } label: {
+                    Label(allFavorite ? "取消收藏" : "收藏", systemImage: allFavorite ? "star.slash" : "star")
+                }
+                Menu {
+                    Button("待整理") { store.organize(store.selection, into: nil) }
+                    ForEach(store.snapshot.collections) { collection in
+                        Button(collection.name) { store.organize(store.selection, into: collection.id) }
+                    }
+                } label: {
+                    Label("整理到", systemImage: "folder")
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                Button(role: .destructive) { store.requestDeleteSelection() } label: {
+                    Label("删除", systemImage: "trash")
+                }
+            }
+            .controlSize(.large)
+            .disabled(store.isBatchUpdating || store.isDeleting)
+            Text("删除只移除资料库内的副本与配图，原始文件仍保留在原位置。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40)
+    }
+}
 
 struct LinkedFilePreviewView: View {
     let file: LinkedFilePreview

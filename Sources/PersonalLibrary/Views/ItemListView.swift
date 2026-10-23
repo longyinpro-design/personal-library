@@ -12,11 +12,11 @@ struct ItemListView: View {
             if store.scope == .history { history }
             else { results }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) { statusBar }
+        .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
     }
 
     private var results: some View {
-        List(selection: $store.selectedID) {
+        List(selection: $store.selection) {
             ForEach(store.displayedItems) { item in
                 ItemRow(item: item, collection: store.collectionName(item.collectionID),
                         excerpt: store.searchResults.presentations[item.id]?.excerpt ?? "")
@@ -26,25 +26,36 @@ struct ItemListView: View {
         .listStyle(.inset)
         .accessibilityIdentifier(ListFocusRequest.accessibilityID)
         .contextMenu(forSelectionType: String.self) { ids in
-            if let id = ids.first, let item = store.snapshot.items.first(where: { $0.id == id }) {
-                Button(item.favorite ? "取消收藏" : "收藏") { store.favorite(item) }
-                if item.isEditable { Button("编辑") { store.edit(item) } }
-                else {
-                    Button("打开文件") { store.open(item) }
-                    Button("在 Finder 中显示") { store.reveal(item) }
+            let items = store.items(for: ids)
+            if !items.isEmpty {
+                let allFavorite = items.allSatisfy(\.favorite)
+                Button(allFavorite ? "取消收藏" : "收藏") {
+                    store.setFavorite(ids, value: !allFavorite)
+                }
+                if items.count == 1 {
+                    let item = items[0]
+                    if item.isEditable { Button("编辑") { store.edit(item) } }
+                    else {
+                        Button("打开文件") { store.open(item) }
+                        Button("在 Finder 中显示") { store.reveal(item) }
+                    }
                 }
                 Menu("整理到") {
-                    Button("待整理") { store.organize(item, into: nil) }
+                    Button("待整理") { store.organize(ids, into: nil) }
                     ForEach(store.snapshot.collections) { collection in
-                        Button(collection.name) { store.organize(item, into: collection.id) }
+                        Button(collection.name) { store.organize(ids, into: collection.id) }
                     }
+                }
+                Divider()
+                Button(role: .destructive) { store.requestDelete(ids) } label: {
+                    Label(items.count == 1 ? "删除" : "删除 \(items.count) 项", systemImage: "trash")
                 }
             }
         } primaryAction: { ids in
-            if let id = ids.first, let item = store.snapshot.items.first(where: { $0.id == id }) {
-                if item.isEditable { store.edit(item) } else { store.open(item) }
-            }
+            guard ids.count == 1, let item = store.items(for: ids).first else { return }
+            if item.isEditable { store.edit(item) } else { store.open(item) }
         }
+        .onDeleteCommand { store.requestDeleteSelection() }
         // Replace the native list and its selection actions together for a new result order.
         // AppKit's incremental insertion of thousands of automatic-height rows blocks the main thread.
         .background(ListLayoutCallback { window in
@@ -120,8 +131,11 @@ struct ItemListView: View {
         }
         guard tables.count == 1, let table = tables.first else { return }
         let responder = window.firstResponder
+        let indexes = IndexSet(store.displayedItems.enumerated().compactMap {
+            store.selection.contains($0.element.id) ? $0.offset : nil
+        })
         guard responder === window || responder === request.previousList || responder === table,
-              let id = store.selectedID, let index = store.displayedItems.firstIndex(where: { $0.id == id }) else {
+              !indexes.isEmpty else {
             focusToRestore = nil
             return
         }
@@ -142,9 +156,10 @@ struct ItemListView: View {
             table.rowHeight = estimatedHeight
             table.reloadData()
         }
-        guard table.numberOfRows == store.displayedItems.count, index < table.numberOfRows,
+        guard table.numberOfRows == store.displayedItems.count, indexes.last! < table.numberOfRows,
               window.makeFirstResponder(table) else { return }
-        table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        table.selectRowIndexes(indexes, byExtendingSelection: false)
+        guard let index = indexes.first else { return }
         table.scrollRowToVisible(index)
         let rowRect = table.rect(ofRow: index)
         let margin = max(0, (table.visibleRect.height - rowRect.height) / 2)
@@ -184,11 +199,49 @@ struct ItemListView: View {
         }
     }
 
+    private var bottomBar: some View {
+        VStack(spacing: 0) {
+            if store.scope != .history, store.selection.count > 1 {
+                bulkBar
+                Divider()
+            }
+            statusBar
+        }
+    }
+
+    private var bulkBar: some View {
+        let allFavorite = !store.selection.isEmpty && store.items(for: store.selection).allSatisfy { $0.favorite }
+        return HStack(spacing: 14) {
+            Text("已选择 \(store.selection.count) 项")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button { store.setFavorite(store.selection, value: !allFavorite) } label: {
+                Label(allFavorite ? "取消收藏" : "收藏", systemImage: allFavorite ? "star.slash" : "star")
+            }
+            Menu {
+                Button("待整理") { store.organize(store.selection, into: nil) }
+                ForEach(store.snapshot.collections) { collection in
+                    Button(collection.name) { store.organize(store.selection, into: collection.id) }
+                }
+            } label: {
+                Label("整理到", systemImage: "folder")
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+            Button(role: .destructive) { store.requestDeleteSelection() } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .buttonStyle(.borderless)
+        .disabled(store.isBatchUpdating || store.isDeleting)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.bar)
+    }
+
     private var statusBar: some View {
         HStack(spacing: 6) {
-            if store.isImporting || store.isSearching { ProgressView().controlSize(.mini) }
+            if store.isImporting || store.isSearching || store.isDeleting { ProgressView().controlSize(.mini) }
             else { Image(systemName: store.ready ? "lock.shield" : "hourglass") }
-            Text(store.isSearching ? "正在搜索…" : store.status).lineLimit(1)
+            Text(store.isDeleting ? "正在删除…" : (store.isSearching ? "正在搜索…" : store.status)).lineLimit(1)
             Spacer(minLength: 0)
             Text("\(store.snapshot.items.count) 项").monospacedDigit()
         }

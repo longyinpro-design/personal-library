@@ -115,20 +115,107 @@ public actor LibraryRepository {
 
     public func setFavorite(id: String, value: Bool) throws {
         guard try !database.rows("SELECT id FROM items WHERE id = ?", [id]).isEmpty else { throw LibraryError.message("资料不存在") }
-        try database.execute("UPDATE items SET favorite = ? WHERE id = ?", [value ? "1" : "0", id])
+        try setFavorite(ids: [id], value: value)
+    }
+
+    public func setFavorite(ids: [String], value: Bool) throws {
+        let ids = Array(Set(ids)).filter { !$0.isEmpty }
+        guard !ids.isEmpty else { return }
+        try database.transaction {
+            for chunk in Self.chunks(ids) {
+                let placeholders = Self.placeholders(chunk.count)
+                try database.execute("UPDATE items SET favorite = ? WHERE id IN (\(placeholders))",
+                                     [value ? "1" : "0"] + Self.optional(chunk))
+            }
+        }
     }
 
     public func organize(id: String, collectionID: String?) throws {
+        try organize(ids: [id], collectionID: collectionID)
+    }
+
+    public func organize(ids: [String], collectionID: String?) throws {
+        let ids = Array(Set(ids)).filter { !$0.isEmpty }
+        guard !ids.isEmpty else { return }
         try database.transaction {
-            guard let item = try database.rows("SELECT title FROM items WHERE id = ?", [id]).first else { throw LibraryError.message("资料不存在") }
             var target = "待整理"
             if let collectionID {
                 guard let collection = try database.rows("SELECT name FROM collections WHERE id = ?", [collectionID]).first else { throw LibraryError.message("目录不存在") }
                 target = collection["name"]!
             }
-            try database.execute("UPDATE items SET collection_id = ? WHERE id = ?", [collectionID, id])
-            try record("将「\(item["title"]!)」归入「\(target)」")
+            var titles: [String] = []
+            for chunk in Self.chunks(ids) {
+                let placeholders = Self.placeholders(chunk.count)
+                titles += try database.rows("SELECT title FROM items WHERE id IN (\(placeholders))",
+                                            Self.optional(chunk)).compactMap { $0["title"] }
+                try database.execute("UPDATE items SET collection_id = ? WHERE id IN (\(placeholders))",
+                                     [collectionID] + Self.optional(chunk))
+            }
+            guard titles.count == ids.count else { throw LibraryError.message("部分资料已不存在，请刷新后重试") }
+            if titles.count == 1 {
+                try record("将「\(titles[0])」归入「\(target)」")
+            } else {
+                try record("将 \(titles.count) 项资料归入「\(target)」")
+            }
         }
+    }
+
+    /// Removes database rows, managed file copies, and archived images that no
+    /// remaining item references. Original files outside the library are untouched.
+    public func delete(ids: [String]) throws -> LibraryDeletionReport {
+        let ids = Array(Set(ids)).filter { !$0.isEmpty }
+        var report = LibraryDeletionReport()
+        guard !ids.isEmpty else { return report }
+
+        var deleted: [DeletedLibraryItem] = []
+        var attachments: Set<String> = []
+        try database.transaction {
+            for chunk in Self.chunks(ids) {
+                let placeholders = Self.placeholders(chunk.count)
+                let rows = try database.rows("SELECT title, relative_path FROM items WHERE id IN (\(placeholders))",
+                                             Self.optional(chunk))
+                deleted += rows.map {
+                    DeletedLibraryItem(title: $0["title"] ?? "未命名资料", relativePath: $0["relative_path"])
+                }
+                let images = try database.rows(
+                    "SELECT relative_path FROM markdown_images WHERE item_id IN (\(placeholders)) AND relative_path IS NOT NULL",
+                    Self.optional(chunk))
+                attachments.formUnion(images.compactMap { $0["relative_path"] })
+                try database.execute("DELETE FROM items WHERE id IN (\(placeholders))", Self.optional(chunk))
+            }
+            if deleted.count == 1 {
+                try record("删除了「\(deleted[0].title)」")
+            } else if !deleted.isEmpty {
+                try record("删除了 \(deleted.count) 项资料")
+            }
+        }
+
+        report.deleted = deleted.count
+        for item in deleted {
+            guard let relative = item.relativePath else { continue }
+            do {
+                let url = try managedFileURL(relative: relative)
+                if FileManager.default.fileExists(atPath: url.path) {
+                    try FileManager.default.removeItem(at: url)
+                }
+            } catch {
+                report.warnings.append("「\(item.title)」：\(error.localizedDescription)")
+            }
+        }
+        for path in attachments.sorted() {
+            do {
+                let stillReferenced = try !database.rows(
+                    "SELECT 1 FROM markdown_images WHERE relative_path = ? LIMIT 1", [path]).isEmpty
+                guard !stillReferenced else { continue }
+                let url = try images.managedURL(path)
+                if FileManager.default.fileExists(atPath: url.path) {
+                    try FileManager.default.removeItem(at: url)
+                }
+            } catch {
+                report.warnings.append("配图 \(path)：\(error.localizedDescription)")
+            }
+        }
+        return report
     }
 
     @discardableResult
@@ -240,15 +327,45 @@ public actor LibraryRepository {
     }
 
     private nonisolated func fileURL(relative: String?) throws -> URL {
-        guard let relative, !relative.isEmpty, !relative.contains("/"), relative != ".", relative != ".." else { throw LibraryError.message("文件路径无效") }
-        let url = root.appendingPathComponent("Files").appendingPathComponent(relative)
-        let parent = root.appendingPathComponent("Files").resolvingSymlinksInPath().standardizedFileURL
-        guard url.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL == parent else { throw LibraryError.message("文件路径超出资料库") }
+        let url = try managedFileURL(relative: relative)
         guard FileManager.default.fileExists(atPath: url.path) else { throw LibraryError.message("资料库中的文件已不在原位置，请从备份恢复。") }
         return url
+    }
+
+    private nonisolated func managedFileURL(relative: String?) throws -> URL {
+        guard let relative, !relative.isEmpty, !relative.contains("/"), relative != ".", relative != ".." else {
+            throw LibraryError.message("文件路径无效")
+        }
+        let folder = root.appendingPathComponent("Files", isDirectory: true)
+        let url = folder.appendingPathComponent(relative)
+        let parent = folder.resolvingSymlinksInPath().standardizedFileURL
+        guard url.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL == parent else {
+            throw LibraryError.message("文件路径超出资料库")
+        }
+        return url
+    }
+
+    private static func placeholders(_ count: Int) -> String {
+        Array(repeating: "?", count: count).joined(separator: ",")
+    }
+
+    private static func optional(_ ids: [String]) -> [String?] {
+        ids.map { Optional($0) }
+    }
+
+    private static func chunks(_ ids: [String], size: Int = 400) -> [[String]] {
+        guard size > 0 else { return [ids] }
+        return stride(from: 0, to: ids.count, by: size).map {
+            Array(ids[$0..<min($0 + size, ids.count)])
+        }
     }
 
     private func record(_ message: String) throws {
         try database.execute("INSERT INTO activities (id,message,date) VALUES (?,?,?)", [UUID().uuidString, message, String(Date().timeIntervalSince1970)])
     }
+}
+
+private struct DeletedLibraryItem {
+    let title: String
+    let relativePath: String?
 }

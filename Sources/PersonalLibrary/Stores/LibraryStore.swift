@@ -53,9 +53,20 @@ final class LibraryStore: ObservableObject {
     // Changes before publishing results, and only when membership/order changes.
     private(set) var resultListID = UUID()
     @Published private(set) var isSearching = false
-    @Published var selectedID: String? {
+    @Published var selection: Set<String> = [] {
         didSet {
-            if selectedID != oldValue, let selectedID, selectedID != pendingReading?.itemID { pendingReading = nil }
+            guard selection != oldValue else { return }
+            if let pending = pendingReading, selectedID != pending.itemID { pendingReading = nil }
+        }
+    }
+    @Published var pendingDeletion: Set<String> = []
+    @Published private(set) var isDeleting = false
+    @Published private(set) var isBatchUpdating = false
+    var selectedID: String? {
+        get { selection.count == 1 ? selection.first : nil }
+        set {
+            let next = newValue.map { Set([$0]) } ?? []
+            if selection != next { selection = next }
         }
     }
     @Published private(set) var readingRequest: ReadingRequest?
@@ -155,7 +166,15 @@ final class LibraryStore: ObservableObject {
 
     deinit { searchTask?.cancel() }
 
-    var selectedItem: LibraryItem? { snapshot.items.first { $0.id == selectedID } }
+    var selectedItem: LibraryItem? {
+        guard let id = selectedID else { return nil }
+        return snapshot.items.first { $0.id == id }
+    }
+
+    func items(for ids: Set<String>) -> [LibraryItem] {
+        guard !ids.isEmpty else { return [] }
+        return snapshot.items.filter { ids.contains($0.id) }
+    }
     var inboxCount: Int { snapshot.items.filter { $0.collectionID == nil }.count }
     var totalBytes: Int64 { snapshot.items.reduce(0) { $0 + $1.byteCount } }
 
@@ -175,7 +194,9 @@ final class LibraryStore: ObservableObject {
     }
 
     func selectVisibleItem() {
-        if !displayedItems.contains(where: { $0.id == selectedID }) { selectedID = displayedItems.first?.id }
+        let visible = Set(displayedItems.map(\.id))
+        if !selection.isSubset(of: visible) { selection.formIntersection(visible) }
+        if selection.isEmpty, let first = displayedItems.first?.id { selection = [first] }
     }
 
     func navigate(_ target: LibraryScope) {
@@ -324,22 +345,90 @@ final class LibraryStore: ObservableObject {
         showNewCollection = false
     }
 
-    func favorite(_ item: LibraryItem) {
-        guard let repository else { return }
-        Task {
-            do { try await repository.setFavorite(id: item.id, value: !item.favorite); try await reload() }
-            catch { errorMessage = error.localizedDescription }
+    @discardableResult
+    func favorite(_ item: LibraryItem) -> Task<Void, Never>? {
+        setFavorite(Set([item.id]), value: !item.favorite)
+    }
+
+    @discardableResult
+    func setFavorite(_ ids: Set<String>, value: Bool) -> Task<Void, Never>? {
+        guard ready, !isBatchUpdating, let repository, !ids.isEmpty else { return nil }
+        isBatchUpdating = true
+        let count = ids.count
+        return Task {
+            defer { isBatchUpdating = false }
+            do {
+                try await repository.setFavorite(ids: Array(ids), value: value)
+                try await reload()
+                if count == 1 {
+                    status = value ? "已收藏" : "已取消收藏"
+                } else {
+                    status = value ? "已收藏 \(count) 项" : "已取消收藏 \(count) 项"
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+                status = "收藏未完成"
+            }
         }
     }
 
-    func organize(_ item: LibraryItem, into collectionID: String?) {
-        guard let repository else { return }
-        Task {
+    @discardableResult
+    func organize(_ item: LibraryItem, into collectionID: String?) -> Task<Void, Never>? {
+        organize(Set([item.id]), into: collectionID)
+    }
+
+    @discardableResult
+    func organize(_ ids: Set<String>, into collectionID: String?) -> Task<Void, Never>? {
+        guard ready, !isBatchUpdating, let repository, !ids.isEmpty else { return nil }
+        isBatchUpdating = true
+        let count = ids.count
+        let target = collectionName(collectionID)
+        return Task {
+            defer { isBatchUpdating = false }
             do {
-                try await repository.organize(id: item.id, collectionID: collectionID)
+                try await repository.organize(ids: Array(ids), collectionID: collectionID)
                 try await reload()
-                status = "已归入「\(collectionName(collectionID))」"
-            } catch { errorMessage = error.localizedDescription }
+                status = count == 1 ? "已归入「\(target)」" : "已将 \(count) 项归入「\(target)」"
+            } catch {
+                errorMessage = error.localizedDescription
+                status = "整理未完成"
+            }
+        }
+    }
+
+    func requestDelete(_ ids: Set<String>) {
+        guard ready, !isDeleting, !isBatchUpdating, !ids.isEmpty else { return }
+        pendingDeletion = ids
+    }
+
+    func requestDeleteSelection() {
+        requestDelete(selection)
+    }
+
+    func cancelDelete() {
+        pendingDeletion = []
+    }
+
+    func confirmDelete(_ requested: Set<String>? = nil) async {
+        let ids = requested ?? pendingDeletion
+        guard !ids.isEmpty, !isDeleting, !isBatchUpdating, let repository else { return }
+        pendingDeletion = []
+        isDeleting = true
+        defer { isDeleting = false }
+        do {
+            let report = try await repository.delete(ids: Array(ids))
+            selection.subtract(ids)
+            try await reload()
+            if report.deleted == 0 {
+                status = "没有可删除的资料"
+            } else if report.warnings.isEmpty {
+                status = "已删除 \(report.deleted) 项资料，原文件保留"
+            } else {
+                status = "已删除 \(report.deleted) 项，\(report.warnings.count) 个副本未清理"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            status = "删除未完成"
         }
     }
 
