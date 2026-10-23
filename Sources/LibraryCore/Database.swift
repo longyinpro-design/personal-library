@@ -5,6 +5,9 @@ import Foundation
 final class Database {
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    /// FTS5 is present on every supported macOS, but keep search working if a
+    /// future system SQLite is built without it.
+    private(set) var supportsFTS = false
 
     init(url: URL) throws {
         guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
@@ -17,7 +20,7 @@ final class Database {
         try execute("PRAGMA foreign_keys = ON")
         try execute("PRAGMA journal_mode = WAL")
         let version = try rows("PRAGMA user_version").first?["user_version"] ?? "0"
-        guard ["0", "1", "2", "3", "4"].contains(version) else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
+        guard ["0", "1", "2", "3", "4", "5"].contains(version) else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
         try transaction {
             try execute("CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)")
             try execute("""
@@ -47,7 +50,40 @@ final class Database {
                 )
                 """)
             try execute("CREATE INDEX IF NOT EXISTS item_sources_path ON item_sources(path)")
-            try execute("PRAGMA user_version = 4")
+            do {
+                try execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
+                        title, body,
+                        content='items', content_rowid='rowid',
+                        tokenize='trigram', detail=none
+                    )
+                    """)
+                try execute("""
+                    CREATE TRIGGER IF NOT EXISTS items_fts_insert AFTER INSERT ON items BEGIN
+                        INSERT INTO items_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+                    END
+                    """)
+                try execute("""
+                    CREATE TRIGGER IF NOT EXISTS items_fts_delete AFTER DELETE ON items BEGIN
+                        INSERT INTO items_fts(items_fts, rowid, title, body)
+                        VALUES ('delete', old.rowid, old.title, old.body);
+                    END
+                    """)
+                try execute("""
+                    CREATE TRIGGER IF NOT EXISTS items_fts_update AFTER UPDATE OF title, body ON items BEGIN
+                        INSERT INTO items_fts(items_fts, rowid, title, body)
+                        VALUES ('delete', old.rowid, old.title, old.body);
+                        INSERT INTO items_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+                    END
+                    """)
+                if version != "5" {
+                    try execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
+                }
+                supportsFTS = true
+            } catch {
+                supportsFTS = false
+            }
+            try execute("PRAGMA user_version = 5")
         }
     }
 

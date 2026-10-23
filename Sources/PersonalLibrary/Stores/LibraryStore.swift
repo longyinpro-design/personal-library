@@ -39,7 +39,7 @@ final class NoteDraft: Identifiable, ObservableObject {
 
 @MainActor
 final class LibraryStore: ObservableObject {
-    @Published var snapshot = LibrarySnapshot() { didSet { scheduleSearch() } }
+    @Published var snapshot = LibrarySnapshot() { didSet { if !suppressSearch { scheduleSearch() } } }
     @Published var scope: LibraryScope = .all { didSet { if oldValue != scope { scheduleSearch() } } }
     @Published var query = "" {
         didSet {
@@ -84,6 +84,9 @@ final class LibraryStore: ObservableObject {
     @Published var showNewCollection = false
     let root: URL
     private var repository: LibraryRepository?
+    private var bodyCache: [String: String] = [:]
+    private var suppressSearch = false
+    @Published private(set) var bodyLoadingIDs: Set<String> = []
     private var searchGeneration = 0
     private(set) var searchTask: Task<Void, Never>?
 
@@ -107,7 +110,8 @@ final class LibraryStore: ObservableObject {
 
     var displayedItems: [LibraryItem] { searchResults.items }
 
-    /// One cancellable worker per request; input and SwiftUI rendering never scan full bodies.
+    /// One cancellable request per input. Metadata searches stay on the repository
+    /// actor; only the test-only in-memory fallback builds a detached worker.
     private func scheduleSearch(debounce: Bool = false) {
         searchGeneration += 1
         let generation = searchGeneration
@@ -116,31 +120,30 @@ final class LibraryStore: ObservableObject {
         let scope = scope
         let kind = kindFilter
         let query = query
+        let repository = repository
+        let filter = searchFilter(for: scope, kind: kind)
         isSearching = scope != .history
         searchTask = Task { [weak self] in
             do {
                 if debounce && !query.isEmpty { try await Task.sleep(for: .milliseconds(120)) }
                 try Task.checkCancellation()
-                let worker = Task.detached(priority: .userInitiated) {
-                    var candidates = items.filter { item in
-                        switch scope {
-                        case .all, .recent: return true
-                        case .inbox: return item.collectionID == nil
-                        case .notes: return item.kind == .note
-                        case .thoughts: return item.kind == .thought
-                        case .favorites: return item.favorite
-                        case .collection(let id): return item.collectionID == id
-                        case .history: return false
-                        }
+                let results: LibrarySearchResults
+                if scope == .history {
+                    results = LibrarySearchResults(query: query)
+                } else if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    results = try Self.metadataResults(items: items, scope: scope, kind: kind, query: query)
+                } else if let repository {
+                    results = try await repository.search(query: query, filter: filter)
+                } else {
+                    let worker = Task.detached(priority: .userInitiated) {
+                        let candidates = Self.scopedItems(items, scope: scope, kind: kind)
+                        return try LibrarySearch.search(candidates, query: query)
                     }
-                    if scope == .recent { candidates = Array(candidates.sorted { $0.createdAt > $1.createdAt }.prefix(50)) }
-                    if let kind { candidates = candidates.filter { $0.kind == kind } }
-                    return try LibrarySearch.search(candidates, query: query)
-                }
-                let results = try await withTaskCancellationHandler {
-                    try await worker.value
-                } onCancel: {
-                    worker.cancel()
+                    results = try await withTaskCancellationHandler {
+                        try await worker.value
+                    } onCancel: {
+                        worker.cancel()
+                    }
                 }
                 guard let self, !Task.isCancelled, self.searchGeneration == generation else { return }
                 if !self.searchResults.items.elementsEqual(results.items, by: { $0.id == $1.id }) {
@@ -162,6 +165,42 @@ final class LibraryStore: ObservableObject {
                 self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func searchFilter(for scope: LibraryScope, kind: ItemKind?) -> LibrarySearchFilter {
+        var filter = LibrarySearchFilter()
+        switch scope {
+        case .all, .history: break
+        case .recent: filter.recentLimit = 50
+        case .inbox: filter.inboxOnly = true
+        case .notes: filter.kind = .note
+        case .thoughts: filter.kind = .thought
+        case .favorites: filter.favoritesOnly = true
+        case .collection(let id): filter.collectionID = id
+        }
+        if let kind { filter.kind = kind }
+        return filter
+    }
+
+    nonisolated private static func scopedItems(_ items: [LibraryItem], scope: LibraryScope, kind: ItemKind?) -> [LibraryItem] {
+        var candidates = items.filter { item in
+            switch scope {
+            case .all, .recent: return true
+            case .inbox: return item.collectionID == nil
+            case .notes: return item.kind == .note
+            case .thoughts: return item.kind == .thought
+            case .favorites: return item.favorite
+            case .collection(let id): return item.collectionID == id
+            case .history: return false
+            }
+        }
+        if scope == .recent { candidates = Array(candidates.sorted { $0.createdAt > $1.createdAt }.prefix(50)) }
+        if let kind { candidates = candidates.filter { $0.kind == kind } }
+        return candidates
+    }
+
+    nonisolated private static func metadataResults(items: [LibraryItem], scope: LibraryScope, kind: ItemKind?, query: String) throws -> LibrarySearchResults {
+        try LibrarySearch.search(scopedItems(items, scope: scope, kind: kind), query: query)
     }
 
     deinit { searchTask?.cancel() }
@@ -319,7 +358,18 @@ final class LibraryStore: ObservableObject {
     }
     func edit(_ item: LibraryItem) {
         guard ready, draft == nil, !isImporting else { return }
-        draft = NoteDraft(itemID: item.id, title: item.title, body: item.text, kind: item.kind)
+        if item.textLoaded {
+            draft = NoteDraft(itemID: item.id, title: item.title, body: item.text, kind: item.kind)
+            return
+        }
+        status = "正在载入正文…"
+        Task {
+            await loadBody(item.id)
+            guard draft == nil, selectedID == item.id,
+                  let current = snapshot.items.first(where: { $0.id == item.id }), current.textLoaded else { return }
+            status = ""
+            draft = NoteDraft(itemID: current.id, title: current.title, body: current.text, kind: current.kind)
+        }
     }
 
     func save(_ draft: NoteDraft) async throws {
@@ -330,6 +380,7 @@ final class LibraryStore: ObservableObject {
         let collection: String?
         if case .collection(let id) = scope { collection = id } else { collection = nil }
         let id = try await repository.saveNote(id: draft.itemID, title: draft.title, body: draft.body, kind: draft.kind, collectionID: collection)
+        bodyCache[id] = draft.body
         try await reload()
         scope = draft.kind == .note ? .notes : .thoughts
         query = ""; kindFilter = nil; selectedID = id
@@ -359,7 +410,14 @@ final class LibraryStore: ObservableObject {
             defer { isBatchUpdating = false }
             do {
                 try await repository.setFavorite(ids: Array(ids), value: value)
-                try await reload()
+                suppressSearch = true
+                var items = snapshot.items
+                for index in items.indices where ids.contains(items[index].id) {
+                    items[index].favorite = value
+                }
+                snapshot.items = items
+                suppressSearch = false
+                scheduleSearch()
                 if count == 1 {
                     status = value ? "已收藏" : "已取消收藏"
                 } else {
@@ -387,7 +445,18 @@ final class LibraryStore: ObservableObject {
             defer { isBatchUpdating = false }
             do {
                 try await repository.organize(ids: Array(ids), collectionID: collectionID)
-                try await reload()
+                let title = snapshot.items.first { ids.contains($0.id) }?.title ?? ""
+                suppressSearch = true
+                var items = snapshot.items
+                for index in items.indices where ids.contains(items[index].id) {
+                    items[index].collectionID = collectionID
+                }
+                snapshot.items = items
+                let message = count == 1 ? "将「\(title)」归入「\(target)」" : "将 \(count) 项资料归入「\(target)」"
+                snapshot.activities.insert(LibraryActivity(id: UUID().uuidString, message: message, date: Date()), at: 0)
+                if snapshot.activities.count > 200 { snapshot.activities.removeLast(snapshot.activities.count - 200) }
+                suppressSearch = false
+                scheduleSearch()
                 status = count == 1 ? "已归入「\(target)」" : "已将 \(count) 项归入「\(target)」"
             } catch {
                 errorMessage = error.localizedDescription
@@ -500,16 +569,68 @@ final class LibraryStore: ObservableObject {
         panel.allowedContentTypes = [.plainText]
         panel.canCreateDirectories = true
         panel.begin { [weak self] result in
-            guard result == .OK, let url = panel.url else { return }
-            do {
-                try ("# \(item.title)\n\n\(item.text)\n").write(to: url, atomically: true, encoding: .utf8)
-                self?.status = "已导出 Markdown"
-            } catch { self?.errorMessage = error.localizedDescription }
+            guard result == .OK, let url = panel.url, let self else { return }
+            Task { @MainActor in
+                do {
+                    let body: String
+                    if item.textLoaded {
+                        body = item.text
+                    } else if let repository = self.repository {
+                        body = try await repository.body(for: item.id) ?? ""
+                    } else {
+                        throw LibraryError.message("资料库尚未就绪")
+                    }
+                    try ("# \(item.title)\n\n\(body)\n").write(to: url, atomically: true, encoding: .utf8)
+                    self.status = "已导出 Markdown"
+                } catch { self.errorMessage = error.localizedDescription }
+            }
         }
+    }
+
+    func loadBody(_ id: String) async {
+        guard let repository else { return }
+        if let cached = bodyCache[id] {
+            suppressSearch = true
+            applyBody(cached, to: id)
+            suppressSearch = false
+            return
+        }
+        if let item = snapshot.items.first(where: { $0.id == id }), item.textLoaded { return }
+        guard !bodyLoadingIDs.contains(id) else { return }
+        bodyLoadingIDs.insert(id)
+        defer { bodyLoadingIDs.remove(id) }
+        do {
+            guard let body = try await repository.body(for: id) else {
+                throw LibraryError.message("资料不存在，可能已被删除")
+            }
+            bodyCache[id] = body
+            suppressSearch = true
+            applyBody(body, to: id)
+            suppressSearch = false
+        } catch {
+            if selectedID == id {
+                errorMessage = error.localizedDescription
+                status = "正文载入失败"
+            }
+        }
+    }
+
+    private func applyBody(_ body: String, to id: String) {
+        guard let index = snapshot.items.firstIndex(where: { $0.id == id }) else { return }
+        snapshot.items[index].text = body
+        snapshot.items[index].textLoaded = true
     }
 
     private func reload() async throws {
         guard let repository else { return }
-        snapshot = try await repository.snapshot()
+        let cached = bodyCache
+        let next = try await repository.snapshot()
+        let ids = Set(next.items.map(\.id))
+        bodyCache = cached.filter { ids.contains($0.key) }
+        suppressSearch = true
+        snapshot = next
+        for (id, body) in bodyCache { applyBody(body, to: id) }
+        suppressSearch = false
+        scheduleSearch()
     }
 }

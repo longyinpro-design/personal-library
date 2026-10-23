@@ -1,5 +1,22 @@
 import Foundation
 
+/// Scope and filters applied before matching, so FTS only ranks the visible slice.
+public struct LibrarySearchFilter: Sendable, Equatable {
+    public var kind: ItemKind?
+    public var collectionID: String?
+    public var inboxOnly: Bool
+    public var favoritesOnly: Bool
+    public var recentLimit: Int?
+
+    public init(kind: ItemKind? = nil, collectionID: String? = nil, inboxOnly: Bool = false, favoritesOnly: Bool = false, recentLimit: Int? = nil) {
+        self.kind = kind
+        self.collectionID = collectionID
+        self.inboxOnly = inboxOnly
+        self.favoritesOnly = favoritesOnly
+        self.recentLimit = recentLimit
+    }
+}
+
 /// Immutable output for one query. Views read this without searching the document bodies again.
 public struct LibrarySearchResults: Sendable {
     public let query: String

@@ -36,6 +36,9 @@ struct DetailView: View {
                                     Label("文件不在原位置，请恢复备份或重新导入。", systemImage: "exclamationmark.triangle")
                                         .foregroundStyle(.secondary).font(.system(size: 12))
                                 }
+                            } else if !item.textLoaded {
+                                ProgressView("正在载入正文…")
+                                    .frame(maxWidth: .infinity, minHeight: 260)
                             } else if !item.text.isEmpty {
                                 if item.usesMarkdown {
                                     MarkdownReader(source: item.text,
@@ -58,6 +61,10 @@ struct DetailView: View {
                         }.padding(28)
                     }
                 }.id(item.id)
+                    .task(id: item.id) {
+                        guard item.kind != .image, item.fileExtension != "PDF" else { return }
+                        await store.loadBody(item.id)
+                    }
             } else {
                 EmptyLibraryView(title: "每一份资料，都触手可及", message: "选择一份文件或笔记，\n在这里查看内容与整理归属。", symbol: "doc.text.magnifyingglass")
             }

@@ -19,15 +19,20 @@ public actor LibraryRepository {
         var snapshot = LibrarySnapshot()
         let imageRows = Dictionary(grouping: try database.rows("SELECT * FROM markdown_images ORDER BY reference"), by: { $0["item_id"]! })
         let sourceRows = Dictionary(grouping: try database.rows("SELECT * FROM item_sources ORDER BY path"), by: { $0["item_id"]! })
-        snapshot.items = try database.rows("SELECT * FROM items ORDER BY updated_at DESC, id").map { row in
+        snapshot.items = try database.rows("""
+            SELECT id, title, kind, relative_path, substr(body, 1, 240) AS preview,
+                   extraction_note, byte_count, created_at, updated_at, collection_id,
+                   favorite, image_base_path
+            FROM items ORDER BY updated_at DESC, id
+            """).map { row in
             guard let id = row["id"], let title = row["title"], let rawKind = row["kind"], let kind = ItemKind(rawValue: rawKind),
-                  let body = row["body"], let created = Double(row["created_at"] ?? ""), let updated = Double(row["updated_at"] ?? ""),
+                  let created = Double(row["created_at"] ?? ""), let updated = Double(row["updated_at"] ?? ""),
                   let size = Int64(row["byte_count"] ?? "") else { throw LibraryError.message("资料库记录格式损坏，请保留数据目录并恢复备份。") }
             let attached = try (imageRows[id] ?? []).reduce(into: [String: URL]()) { result, image in
                 if let path = image["relative_path"] { result[image["reference"]!] = try images.managedURL(path) }
             }
             let issues = (imageRows[id] ?? []).compactMap { image in image["failure"].map { "\(image["reference"]!)：\($0)" } }
-            return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: body, extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] })
+            return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: "", extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] }, preview: row["preview"] ?? "", textLoaded: false)
         }
         snapshot.collections = try database.rows("SELECT * FROM collections ORDER BY name COLLATE NOCASE").map {
             LibraryCollection(id: $0["id"]!, name: $0["name"]!)
@@ -358,6 +363,99 @@ public actor LibraryRepository {
         return stride(from: 0, to: ids.count, by: size).map {
             Array(ids[$0..<min($0 + size, ids.count)])
         }
+    }
+
+    /// Search metadata plus FTS candidates; the full body is only read for rows
+    /// that can match, then discarded before results leave the actor.
+    public func search(query: String, filter: LibrarySearchFilter = LibrarySearchFilter()) throws -> LibrarySearchResults {
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !terms.isEmpty else { return LibrarySearchResults(query: query) }
+
+        var scopeClauses: [String] = []
+        var scopeValues: [String?] = []
+        if let kind = filter.kind {
+            scopeClauses.append("kind = ?")
+            scopeValues.append(kind.rawValue)
+        }
+        if filter.favoritesOnly { scopeClauses.append("favorite = 1") }
+        if filter.inboxOnly { scopeClauses.append("collection_id IS NULL") }
+        if let collection = filter.collectionID {
+            scopeClauses.append("collection_id = ?")
+            scopeValues.append(collection)
+        }
+        let scopeClause = scopeClauses.isEmpty ? "1=1" : scopeClauses.joined(separator: " AND ")
+
+        var searchClauses: [String] = []
+        var searchValues: [String?] = []
+        for term in terms {
+            if database.supportsFTS, term.count >= 3 {
+                let expression = Self.trigrams(term).map(Self.ftsQuoted).joined(separator: " AND ")
+                if !expression.isEmpty {
+                    searchClauses.append("rowid IN (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)")
+                    searchValues.append(expression)
+                    continue
+                }
+            }
+            let pattern = Self.likePattern(term)
+            searchClauses.append("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')")
+            searchValues.append(pattern)
+            searchValues.append(pattern)
+        }
+        let searchClause = searchClauses.joined(separator: " AND ")
+
+        let source = "SELECT rowid AS rowid, * FROM items WHERE \(scopeClause)"
+        let sql: String
+        if let limit = filter.recentLimit {
+            sql = "SELECT * FROM (\(source) ORDER BY created_at DESC LIMIT \(max(1, limit))) WHERE \(searchClause) ORDER BY updated_at DESC, id"
+        } else {
+            sql = "SELECT * FROM (\(source) AND \(searchClause)) ORDER BY updated_at DESC, id"
+        }
+        let rows = try database.rows(sql, scopeValues + searchValues)
+        var candidates: [LibraryItem] = []
+        candidates.reserveCapacity(rows.count)
+        for row in rows {
+            guard let id = row["id"], let title = row["title"], let rawKind = row["kind"], let kind = ItemKind(rawValue: rawKind),
+                  let body = row["body"], let created = Double(row["created_at"] ?? ""), let updated = Double(row["updated_at"] ?? ""),
+                  let size = Int64(row["byte_count"] ?? "") else {
+                throw LibraryError.message("资料库记录格式损坏，请保留数据目录并恢复备份。")
+            }
+            candidates.append(LibraryItem(
+                id: id, title: title, kind: kind, relativePath: row["relative_path"], text: body,
+                extractionNote: row["extraction_note"], byteCount: size,
+                createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated),
+                collectionID: row["collection_id"], favorite: row["favorite"] == "1",
+                imageBasePath: row["image_base_path"], preview: String(body.prefix(240)), textLoaded: true
+            ))
+        }
+        let matched = try LibrarySearch.search(candidates, query: query)
+        let stripped = matched.items.map { item -> LibraryItem in
+            var item = item
+            item.text = ""
+            item.textLoaded = false
+            return item
+        }
+        return LibrarySearchResults(query: query, items: stripped, presentations: matched.presentations)
+    }
+
+    public func body(for id: String) throws -> String? {
+        try database.rows("SELECT body FROM items WHERE id = ?", [id]).first?["body"]
+    }
+
+    private static func trigrams(_ term: String) -> [String] {
+        let characters = Array(term)
+        guard characters.count >= 3 else { return [] }
+        return (0...(characters.count - 3)).map { String(characters[$0..<($0 + 3)]) }
+    }
+
+    private static func ftsQuoted(_ trigram: String) -> String {
+        "\"" + trigram.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    private static func likePattern(_ term: String) -> String {
+        var escaped = term.replacingOccurrences(of: "\\", with: "\\\\")
+        escaped = escaped.replacingOccurrences(of: "%", with: "\\%")
+        escaped = escaped.replacingOccurrences(of: "_", with: "\\_")
+        return "%\(escaped)%"
     }
 
     private func record(_ message: String) throws {

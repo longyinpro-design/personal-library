@@ -38,6 +38,10 @@ public struct LibraryItem: Identifiable, Sendable {
     public var imageAttachments: [String: URL] = [:]
     public var imageAttachmentIssues: [String] = []
     public var sourcePaths: [String] = []
+    /// A short body prefix for list rows. Snapshots load this instead of the full text.
+    public var preview: String = ""
+    /// False until the reader asks for this item's body.
+    public var textLoaded: Bool = true
     public var isEditable: Bool { kind == .note || kind == .thought }
     public var usesMarkdown: Bool { isEditable || ["MD", "MARKDOWN"].contains(fileExtension) }
     public var fileExtension: String {
@@ -48,12 +52,23 @@ public struct LibraryItem: Identifiable, Sendable {
 public struct LibraryCollection: Identifiable, Sendable {
     public let id: String
     public let name: String
+
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
 }
 
 public struct LibraryActivity: Identifiable, Sendable {
     public let id: String
     public let message: String
     public let date: Date
+
+    public init(id: String, message: String, date: Date) {
+        self.id = id
+        self.message = message
+        self.date = date
+    }
 }
 
 public struct LibrarySnapshot: Sendable {

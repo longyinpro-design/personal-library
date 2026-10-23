@@ -264,7 +264,7 @@ private struct ItemRow: View {
                     Spacer(minLength: 0)
                     if item.favorite { Image(systemName: "star.fill").font(.caption2) }
                 }
-                Text(item.text.isEmpty ? (item.extractionNote ?? "暂无正文") : excerpt)
+                Text(excerpt.isEmpty ? (item.preview.isEmpty ? (item.extractionNote ?? "暂无正文") : item.preview) : excerpt)
                     .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack {

@@ -29,7 +29,7 @@ final class LibraryRepositoryTests {
         let reopened = try LibraryRepository(root: root)
         let state = try await reopened.snapshot()
         #expect(state.items.count == 1)
-        #expect(state.items[0].text == "计量协议与交付材料")
+        #expect(try await repo.body(for: state.items[0].id) == "计量协议与交付材料")
         #expect(state.items[0].collectionID == collection)
         #expect(state.items[0].favorite)
         #expect(state.collections[0].name == "巴西 Energisa")
@@ -44,7 +44,8 @@ final class LibraryRepositoryTests {
         #expect(report.importedIDs.count == 1)
         #expect(report.failures.isEmpty)
         let state = try await repo.snapshot()
-        let item = try #require(state.items.first)
+        var item = try #require(state.items.first)
+        item.text = try #require(try await repo.body(for: item.id))
         #expect(try Data(contentsOf: source) == original)
         let managed = try repo.fileURL(for: item)
         #expect(managed != source)
@@ -64,7 +65,9 @@ final class LibraryRepositoryTests {
         let state = try await repo.snapshot()
         #expect(state.items.count == 2)
         #expect(Set(state.items.compactMap(\.relativePath)).count == 2)
-        #expect(Set(state.items.map(\.text)) == Set(["第一份内容", "更新后的内容"]))
+        var bodies: Set<String> = []
+        for item in state.items { bodies.insert(try #require(try await repo.body(for: item.id))) }
+        #expect(bodies == Set(["第一份内容", "更新后的内容"]))
     }
 
     @Test func testPartialImportReportsInvalidPathsWithoutLosingGoodFiles() async throws {
@@ -89,7 +92,8 @@ final class LibraryRepositoryTests {
         let report = try await repo.importFiles([docx])
         #expect(report.failures.isEmpty)
         let state = try await repo.snapshot()
-        let item = try #require(state.items.first)
+        var item = try #require(state.items.first)
+        item.text = try #require(try await repo.body(for: item.id))
         #expect(item.kind == .document)
         #expect(item.extractionNote == nil)
         #expect(LibrarySearch.matches(item, query: "巴西 交付"))
@@ -108,7 +112,9 @@ final class LibraryRepositoryTests {
         let repo = try LibraryRepository(root: root)
         _ = try await repo.importFiles([pdf])
         let state = try await repo.snapshot()
-        #expect(LibrarySearch.matches(try #require(state.items.first), query: "Brazil acceptance"))
+        var item = try #require(state.items.first)
+        item.text = try #require(try await repo.body(for: item.id))
+        #expect(LibrarySearch.matches(item, query: "Brazil acceptance"))
         #expect(state.items[0].extractionNote == nil)
     }
 
@@ -119,7 +125,7 @@ final class LibraryRepositoryTests {
         let report = try await repo.importFiles([broken, unknown])
         #expect(report.importedIDs.count == 2)
         let state = try await repo.snapshot()
-        #expect(state.items.allSatisfy { $0.extractionNote != nil && $0.text.isEmpty })
+        #expect(state.items.allSatisfy { $0.extractionNote != nil && !$0.textLoaded })
         for item in state.items { #expect(FileManager.default.fileExists(atPath: try repo.fileURL(for: item).path)) }
     }
 
@@ -155,7 +161,7 @@ final class LibraryRepositoryTests {
         let id = try await repo.saveNote(title: "想法", body: "原文", kind: .thought, collectionID: collection)
         _ = try await repo.saveNote(id: id, title: "新想法", body: "开头\0末尾", kind: .thought)
         let state = try await repo.snapshot()
-        #expect(state.items[0].text == "开头\0末尾")
+        #expect(try await repo.body(for: state.items[0].id) == "开头\0末尾")
         #expect(state.items[0].title == "新想法")
         #expect(state.items[0].collectionID == collection)
     }
@@ -189,7 +195,7 @@ final class LibraryRepositoryTests {
         _ = try await repo.importFiles([source])
         let state = try await repo.snapshot()
         let item = try #require(state.items.first)
-        #expect(item.text.count == 2_000_000)
+        #expect(try await repo.body(for: item.id)?.count == 2_000_000)
         #expect(item.extractionNote != nil)
         #expect(try String(contentsOf: repo.fileURL(for: item)).count == content.count)
     }

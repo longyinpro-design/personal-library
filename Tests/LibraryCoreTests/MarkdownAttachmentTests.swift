@@ -21,7 +21,7 @@ struct MarkdownAttachmentTests {
         let selected = try await repo.setImageBaseDirectory(id: id, directory: source)
         #expect(selected.saved == 2 && selected.failures.count == 1)
         let note = try #require(try await repo.snapshot().items.first(where: { $0.id == id }))
-        #expect(note.text == body && note.imageAttachments.count == 2 && note.imageAttachmentIssues.count == 1)
+        #expect(try await repo.body(for: id) == body && note.imageAttachments.count == 2 && note.imageAttachmentIssues.count == 1)
     }
 
     private func workspace() throws -> URL {
@@ -155,7 +155,8 @@ struct MarkdownAttachmentTests {
             try await repo.saveNote(id: id, title: "更改", body: "![a](a.svg) ![b](b.svg)", kind: .note)
         }
         let after = try #require(try await repo.snapshot().items.first)
-        #expect(after.title == before.title && after.text == before.text && after.updatedAt == before.updatedAt)
+        #expect(after.title == before.title && after.updatedAt == before.updatedAt)
+        #expect(try await repo.body(for: id) == "![a](a.svg)")
         #expect(after.imageAttachments == before.imageAttachments)
         #expect(try FileManager.default.contentsOfDirectory(atPath: library.appendingPathComponent("Attachments").path).count == 1)
         let file = source.appendingPathComponent("new.md")
@@ -181,7 +182,7 @@ struct MarkdownAttachmentTests {
         let id = try #require(report.importedIDs.first)
         #expect(report.warnings.isEmpty)
         let imported = try #require(try await repo.snapshot().items.first)
-        #expect(imported.text.count == TextExtractor.maximumCharacters)
+        #expect(try await repo.body(for: id)?.count == TextExtractor.maximumCharacters)
         #expect(imported.imageAttachments.count == 1)
         let db = try Database(url: library.appendingPathComponent("library.sqlite"))
         let before = try db.rows("SELECT * FROM items")
@@ -194,7 +195,7 @@ struct MarkdownAttachmentTests {
         #expect(restored.reused == 1 && repeated.reused == 1 && repeated.copied == 0)
         #expect(try db.rows("SELECT * FROM items") == before)
         #expect(try db.rows("SELECT * FROM activities") == history)
-        #expect(try db.rows("PRAGMA user_version").first?["user_version"] == "4")
+        #expect(try db.rows("PRAGMA user_version").first?["user_version"] == "5")
         #expect(try db.rows("PRAGMA foreign_key_check").isEmpty)
     }
 

@@ -20,7 +20,7 @@ struct MarkdownImageDirectoryTests {
         }
         for _ in 0..<2 {
             let db = try Database(url: path)
-            #expect(try db.rows("PRAGMA user_version").first?["user_version"] == "4")
+            #expect(try db.rows("PRAGMA user_version").first?["user_version"] == "5")
             #expect(try db.rows("SELECT * FROM items") == before) // nil new column is omitted by rows().
             #expect(try db.rows("SELECT * FROM collections").first?["name"] == "资料")
             #expect(try db.rows("SELECT * FROM activities").first?["message"] == "历史记录")
@@ -52,7 +52,10 @@ struct MarkdownImageDirectoryTests {
         let after = try await reopened.snapshot()
         #expect(after.items.first(where: { $0.id == id })?.imageBasePath == another.path)
         #expect(after.items.first(where: { $0.id == note })?.imageBasePath == root.path)
-        #expect(after.items.map(\.text) == before.items.map(\.text))
+        let importedBody = try await repo.body(for: id)
+        let noteBody = try await repo.body(for: note)
+        #expect(try await reopened.body(for: id) == importedBody)
+        #expect(try await reopened.body(for: note) == noteBody)
         #expect(after.items.map(\.updatedAt) == before.items.map(\.updatedAt))
         #expect(after.activities.map(\.id) == before.activities.map(\.id))
     }
