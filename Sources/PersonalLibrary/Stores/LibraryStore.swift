@@ -50,6 +50,7 @@ final class LibraryStore: ObservableObject {
         }
     }
     @Published var kindFilter: ItemKind? { didSet { if oldValue != kindFilter { scheduleSearch() } } }
+    @Published var listOptions = LibraryListOptions() { didSet { if oldValue != listOptions { scheduleSearch() } } }
     @Published private(set) var searchResults = LibrarySearchResults()
     // Changes before publishing results, and only when membership/order changes.
     private(set) var resultListID = UUID()
@@ -135,13 +136,14 @@ final class LibraryStore: ObservableObject {
         let kind = kindFilter
         let query = query
         let repository = repository
+        let options = listOptions
         let filter = searchFilter(for: scope, kind: kind)
         isSearching = scope != .history && scope != .trash
         searchTask = Task { [weak self] in
             do {
                 if debounce && !query.isEmpty { try await Task.sleep(for: .milliseconds(120)) }
                 try Task.checkCancellation()
-                let results: LibrarySearchResults
+                var results: LibrarySearchResults
                 if scope == .history {
                     results = LibrarySearchResults(query: query)
                 } else if scope == .trash {
@@ -161,6 +163,7 @@ final class LibraryStore: ObservableObject {
                         worker.cancel()
                     }
                 }
+                results = Self.applying(options, to: results, hasQuery: !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 guard let self, !Task.isCancelled, self.searchGeneration == generation else { return }
                 if !self.searchResults.items.elementsEqual(results.items, by: { $0.id == $1.id }) {
                     self.resultListID = UUID()
@@ -231,6 +234,16 @@ final class LibraryStore: ObservableObject {
             }
         }
         return LibrarySearchResults(query: query, items: matching)
+    }
+
+    /// Filters and reorders rows that are already in memory; nothing is re-read
+    /// from disk. At the default options this returns the results untouched, so
+    /// the search's relevance order and the list's natural order both survive.
+    nonisolated private static func applying(_ options: LibraryListOptions, to results: LibrarySearchResults, hasQuery: Bool) -> LibrarySearchResults {
+        var items = results.items
+        if options.hasFilters { items = items.filter(options.matches) }
+        if options.sortField != .updated || options.ascending { items = options.sorted(items) }
+        return LibrarySearchResults(query: results.query, items: items, presentations: results.presentations)
     }
 
     deinit { searchTask?.cancel() }

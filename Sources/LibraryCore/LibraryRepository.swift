@@ -22,7 +22,9 @@ public actor LibraryRepository {
         let columns = """
             id, title, kind, relative_path, substr(body, 1, 240) AS preview,
                    extraction_note, byte_count, created_at, updated_at, collection_id,
-                   favorite, image_base_path, deleted_at
+                   favorite, image_base_path, deleted_at,
+                   length(trim(body)) > 0 AS has_body,
+                   instr(body, '](http') > 0 OR instr(body, '<http') > 0 AS has_links
             """
         snapshot.items = try database.rows("SELECT \(columns) FROM items WHERE deleted_at IS NULL ORDER BY updated_at DESC, id")
             .map { try item(from: $0, imageRows: imageRows, sourceRows: sourceRows) }
@@ -46,7 +48,7 @@ public actor LibraryRepository {
             if let path = image["relative_path"] { result[image["reference"]!] = try images.managedURL(path) }
         }
         let issues = (imageRows[id] ?? []).compactMap { image in image["failure"].map { "\(image["reference"]!)：\($0)" } }
-        return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: "", extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] }, preview: row["preview"] ?? "", textLoaded: false, deletedAt: row["deleted_at"].flatMap(Double.init).map { Date(timeIntervalSince1970: $0) })
+        return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: "", extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] }, preview: row["preview"] ?? "", hasBody: row["has_body"] == "1", hasLinks: row["has_links"] == "1", textLoaded: false, deletedAt: row["deleted_at"].flatMap(Double.init).map { Date(timeIntervalSince1970: $0) })
     }
 
     /// One file the user asked to import, with the digest that was read off disk
