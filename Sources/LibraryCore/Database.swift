@@ -3,6 +3,10 @@ import Foundation
 
 /// Owned exclusively by LibraryRepository's serial actor executor.
 final class Database {
+    /// Current schema version, written to `PRAGMA user_version`. Backups record
+    /// theirs, so this is the one place that knows what a build can read.
+    static let schemaVersion = 7
+
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     /// FTS5 is present on every supported macOS, but keep search working if a
@@ -20,7 +24,7 @@ final class Database {
         try execute("PRAGMA foreign_keys = ON")
         try execute("PRAGMA journal_mode = WAL")
         let version = try rows("PRAGMA user_version").first?["user_version"] ?? "0"
-        guard ["0", "1", "2", "3", "4", "5", "6", "7"].contains(version) else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
+        guard version == "0" || (Int(version) ?? 99) <= Self.schemaVersion else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
         try transaction {
             try execute("CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)")
             try execute("""
@@ -98,7 +102,7 @@ final class Database {
             } catch {
                 supportsFTS = false
             }
-            try execute("PRAGMA user_version = 7")
+            try execute("PRAGMA user_version = \(Self.schemaVersion)")
         }
     }
 
@@ -112,6 +116,12 @@ final class Database {
 
     func execute(_ sql: String, _ values: [String?] = []) throws {
         _ = try rows(sql, values)
+    }
+
+    /// Writes a consistent copy of the live database. `VACUUM INTO` goes through
+    /// SQLite itself, so the copy includes whatever is still in the WAL.
+    func backup(to url: URL) throws {
+        try execute("VACUUM INTO ?", [url.path])
     }
 
     func rows(_ sql: String, _ values: [String?] = []) throws -> [[String: String]] {
