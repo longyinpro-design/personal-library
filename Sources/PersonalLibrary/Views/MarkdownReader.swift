@@ -209,6 +209,7 @@ struct LocalInlineImageProvider: InlineImageProvider {
 private struct LocalMarkdownImageView: View {
     let url: URL?
     let context: MarkdownImageContext
+    @Environment(\.openImageViewer) private var openImageViewer
     @ViewState<CGImage?> private var image = nil
     @ViewState<String?> private var failure = nil
 
@@ -217,6 +218,8 @@ private struct LocalMarkdownImageView: View {
             if let image {
                 Image(decorative: image, scale: 1).resizable().scaledToFit()
                     .frame(maxWidth: CGFloat(image.width), alignment: .leading)
+                    .onTapGesture { openPreview() }
+                    .help("点击查看大图")
             } else if let failure {
                 Text(failure).font(.callout).foregroundStyle(.secondary)
                     .padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -236,6 +239,11 @@ private struct LocalMarkdownImageView: View {
                 // A new document or image request owns this view now.
             } catch { if !Task.isCancelled { failure = error.localizedDescription } }
         }
+    }
+
+    private func openPreview() {
+        guard let url, let resolved = try? context.resolve(url) else { return }
+        openImageViewer(ImageViewerRequest(url: resolved, title: url.lastPathComponent))
     }
 
     private struct ImageRequest: Hashable {
