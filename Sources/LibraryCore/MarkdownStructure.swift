@@ -6,9 +6,29 @@ public struct MarkdownSection: Sendable {
     public let markdown: String
 }
 
+/// A heading in document order. `section` is the lazy-rendering section that
+/// contains the heading; a heading nested in a list or quote shares its
+/// containing section.
+public struct MarkdownHeading: Identifiable, Sendable, Hashable {
+    public let level: Int
+    public let title: String
+    public let anchor: String
+    public let section: Int
+
+    public var id: String { anchor }
+
+    public init(level: Int, title: String, anchor: String, section: Int) {
+        self.level = level
+        self.title = title
+        self.anchor = anchor
+        self.section = section
+    }
+}
+
 public struct MarkdownStructure: Sendable {
     public let sections: [MarkdownSection]
     public let anchors: [String: Int]
+    public let headings: [MarkdownHeading]
 
     /// Parse the whole document first so reference definitions survive sectioning.
     /// A heading inside a list/quote lands at its containing section.
@@ -25,6 +45,7 @@ public struct MarkdownStructure: Sendable {
         defer { cmark_node_free(document) }
         var sections: [String] = []
         var anchors: [String: Int] = [:]
+        var headings: [MarkdownHeading] = []
         var aliases: [String: Set<Int>] = [:]
         var used = Set<String>()
         var current = cmark_node_first_child(document)
@@ -32,18 +53,19 @@ public struct MarkdownStructure: Sendable {
             try Task.checkCancellation()
             // Keep ordinary blocks together; start a new section at headings and
             // containers with nested headings so their targets stay close by.
-            let headings = headingTexts(node)
-            if sections.isEmpty || !headings.isEmpty { sections.append("") }
+            let nodeHeadings = headingInfos(node)
+            if sections.isEmpty || !nodeHeadings.isEmpty { sections.append("") }
             let index = sections.count - 1
-            for title in headings {
-                let base = slug(title)
+            for heading in nodeHeadings {
+                let base = slug(heading.title)
                 var value = base
                 var suffix = 0
                 while used.contains(value) { suffix += 1; value = "\(base)-\(suffix)" }
                 used.insert(value); anchors[value] = index
-                let legacy = title.components(separatedBy: .alphanumerics.inverted).map { $0.lowercased() }.joined(separator: "-")
+                headings.append(MarkdownHeading(level: heading.level, title: heading.title, anchor: value, section: index))
+                let legacy = heading.title.components(separatedBy: .alphanumerics.inverted).map { $0.lowercased() }.joined(separator: "-")
                 aliases[legacy, default: []].insert(index)
-                aliases[title, default: []].insert(index)
+                aliases[heading.title, default: []].insert(index)
             }
             guard let rendered = cmark_render_commonmark(node, CMARK_OPT_DEFAULT, 0) else { throw LibraryError.message("无法排版 Markdown 章节") }
             sections[index] += String(cString: rendered) + "\n"
@@ -51,19 +73,19 @@ public struct MarkdownStructure: Sendable {
             current = cmark_node_next(node)
         }
         for (name, indices) in aliases where anchors[name] == nil && indices.count == 1 { anchors[name] = indices.first! }
-        return MarkdownStructure(sections: sections.map { MarkdownSection(markdown: $0) }, anchors: anchors)
+        return MarkdownStructure(sections: sections.map { MarkdownSection(markdown: $0) }, anchors: anchors, headings: headings)
     }
 
-    private static func headingTexts(_ root: UnsafeMutablePointer<cmark_node>) -> [String] {
+    private static func headingInfos(_ root: UnsafeMutablePointer<cmark_node>) -> [(level: Int, title: String)] {
         guard let iterator = cmark_iter_new(root) else { return [] }
         defer { cmark_iter_free(iterator) }
-        var titles: [String] = []
+        var headings: [(level: Int, title: String)] = []
         while cmark_iter_next(iterator) != CMARK_EVENT_DONE {
             guard cmark_iter_get_event_type(iterator) == CMARK_EVENT_ENTER, let node = cmark_iter_get_node(iterator),
                   cmark_node_get_type(node) == CMARK_NODE_HEADING else { continue }
-            titles.append(plainText(node))
+            headings.append((Int(cmark_node_get_heading_level(node)), plainText(node)))
         }
-        return titles
+        return headings
     }
 
     private static func plainText(_ node: UnsafeMutablePointer<cmark_node>) -> String {

@@ -9,6 +9,8 @@ final class MarkdownDocument: ObservableObject {
     @Published private(set) var content: MarkdownContent?
     @Published private(set) var sections: [MarkdownContent] = []
     @Published private(set) var anchors: [String: Int] = [:]
+    @Published private(set) var headings: [MarkdownHeading] = []
+    @Published private(set) var sectionSources: [String] = []
     @Published private(set) var failure: String?
     private var source: String?
     private var generation = 0
@@ -20,10 +22,11 @@ final class MarkdownDocument: ObservableObject {
         generation += 1
         let request = generation
         content = nil
-        sections = []; anchors = [:]; failure = nil
+        sections = []; anchors = [:]; headings = []; sectionSources = []; failure = nil
         let worker = Task.detached(priority: .userInitiated) {
             let parsed = try MarkdownStructure.parse(text)
-            return (parsed.sections.map { MarkdownContent($0.markdown) }, parsed.anchors)
+            return (parsed.sections.map { MarkdownContent($0.markdown) }, parsed.anchors,
+                    parsed.headings, parsed.sections.map(\.markdown))
         }
         do {
             let parsed = try await withTaskCancellationHandler {
@@ -33,6 +36,7 @@ final class MarkdownDocument: ObservableObject {
             }
             guard !Task.isCancelled, generation == request else { return }
             sections = parsed.0; anchors = parsed.1
+            headings = parsed.2; sectionSources = parsed.3
             content = MarkdownContent { for section in parsed.0 { section } }
         } catch {
             guard !Task.isCancelled, generation == request else { return }

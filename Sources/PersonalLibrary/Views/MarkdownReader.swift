@@ -14,8 +14,15 @@ struct MarkdownReader: View {
     let followLink: (URL) -> Void
     let scrollTo: (MarkdownScrollTarget) -> Void
     let reportError: (String) -> Void
+    var onStructure: (([MarkdownHeading], [String]) -> Void)? = nil
+    var onSectionVisible: ((Int) -> Void)? = nil
+    var onSectionHidden: ((Int) -> Void)? = nil
+    /// Restore a remembered reading position once the parsed sections exist.
+    var restoreSection: Int? = nil
+    var onRestoreComplete: (() -> Void)? = nil
     @StateObject private var document = MarkdownDocument()
     @ViewState<Bool> private var showSource = false
+    @State private var showTOC = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -27,6 +34,13 @@ struct MarkdownReader: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 160)
+                if !document.headings.isEmpty {
+                    Button { showTOC.toggle() } label: {
+                        Label("目录", systemImage: "list.bullet")
+                    }
+                    .controlSize(.small)
+                    .popover(isPresented: $showTOC, arrowEdge: .bottom) { tableOfContents }
+                }
                 Spacer()
                 Button("保存配图", action: copyImages)
                     .controlSize(.small)
@@ -63,6 +77,8 @@ struct MarkdownReader: View {
                         Markdown(document.sections[index])
                             .padding(.top, index == 0 ? 0 : 24)
                             .id(MarkdownScrollTarget.section(index))
+                            .onAppear { onSectionVisible?(index) }
+                            .onDisappear { onSectionHidden?(index) }
                     }
                 }
                     .markdownTheme(.library)
@@ -84,7 +100,25 @@ struct MarkdownReader: View {
         }
         .frame(maxWidth: 840, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task(id: source) { await document.load(source) }
+        .task(id: source) {
+            await document.load(source)
+            onStructure?(document.headings, document.sectionSources)
+        }
+        .task(id: RestoreKey(section: restoreSection, ready: document.content != nil)) {
+            guard let section = restoreSection, document.content != nil else { return }
+            if let request = readingRequest, request.itemID == imageContext.itemID, request.fragment != nil {
+                onRestoreComplete?()
+                return
+            }
+            showSource = false
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            jump(to: .section(section))
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            scrollTo(.section(section))
+            onRestoreComplete?()
+        }
         .task(id: JumpKey(request: readingRequest, ready: document.content != nil)) {
             guard let request = readingRequest, request.itemID == imageContext.itemID,
                   document.content != nil else { return }
@@ -97,13 +131,7 @@ struct MarkdownReader: View {
                     reportError("此文档中没有找到标题「\(fragment)」。目标文档已打开，可在「原文」中核对链接。")
                     return
                 }
-                scrollTo(.section(index))
-                // Lazy sections are created on demand; a request handled in the
-                // same update cycle can run before the target section exists.
-                // Retry once after SwiftUI has laid the stack out.
-                try? await Task.sleep(for: .milliseconds(120))
-                guard !Task.isCancelled else { return }
-                scrollTo(.section(index))
+                jump(to: .section(index))
             } else { scrollTo(.top) }
         }
     }
@@ -112,6 +140,46 @@ struct MarkdownReader: View {
         let request: ReadingRequest?
         let ready: Bool
 
+    }
+
+    private struct RestoreKey: Equatable {
+        let section: Int?
+        let ready: Bool
+    }
+
+    private var tableOfContents: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(document.headings) { heading in
+                    Button {
+                        showTOC = false
+                        showSource = false
+                        jump(to: .section(heading.section))
+                    } label: {
+                        Text(heading.title)
+                            .font(.system(size: heading.level <= 1 ? 13 : 12,
+                                          weight: heading.level <= 1 ? .semibold : .regular))
+                            .padding(.leading, CGFloat(max(0, heading.level - 1)) * 14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 3)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(12)
+        }
+        .frame(width: 280, height: 380)
+    }
+
+    private func jump(to target: MarkdownScrollTarget) {
+        scrollTo(target)
+        // Lazy sections are created on demand; a request handled in the same
+        // update cycle can run before the target section exists. Retry once.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            scrollTo(target)
+        }
     }
 }
 

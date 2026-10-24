@@ -23,7 +23,16 @@ struct LinkedFilePreview: Identifiable {
     var isManaged = false
 }
 
-enum MarkdownScrollTarget: Hashable {
+enum MarkdownScrollTarget: Hashable, Sendable {
     case top
     case section(Int)
+    case bodyChunk(Int)
+}
+
+/// A coarse, lazy-layout-safe reading position. Markdown is remembered by
+/// section and plain text by chunk; pixel offsets are not stable while
+/// `LazyVStack` is still materializing.
+enum ReadingAnchor: Hashable {
+    case markdownSection(Int)
+    case bodyChunk(Int)
 }

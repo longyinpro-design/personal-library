@@ -85,6 +85,7 @@ final class LibraryStore: ObservableObject {
     let root: URL
     private var repository: LibraryRepository?
     private var bodyCache: [String: String] = [:]
+    private var readingAnchors: [String: ReadingAnchor] = [:]
     private var suppressSearch = false
     @Published private(set) var bodyLoadingIDs: Set<String> = []
     private var searchGeneration = 0
@@ -317,6 +318,14 @@ final class LibraryStore: ObservableObject {
         selectedID = location.itemID
         readingRequest = request; pendingReading = request
         scheduleSearch()
+    }
+
+    func readingAnchor(for id: String) -> ReadingAnchor? {
+        readingAnchors[id]
+    }
+
+    func rememberReadingAnchor(_ anchor: ReadingAnchor, for id: String) {
+        readingAnchors[id] = anchor
     }
 
     func chooseFiles() {
@@ -627,6 +636,7 @@ final class LibraryStore: ObservableObject {
         let next = try await repository.snapshot()
         let ids = Set(next.items.map(\.id))
         bodyCache = cached.filter { ids.contains($0.key) }
+        readingAnchors = readingAnchors.filter { ids.contains($0.key) }
         suppressSearch = true
         snapshot = next
         for (id, body) in bodyCache { applyBody(body, to: id) }
