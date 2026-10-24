@@ -49,7 +49,7 @@ final class LibrarySearchTests {
         _ = try await repo.saveNote(id: id, title: "临时笔记", body: "新关键词 乙", kind: .note)
         #expect(try await repo.search(query: "旧关键词").items.isEmpty)
         #expect(try await repo.search(query: "新关键词").items.count == 1)
-        _ = try await repo.delete(ids: [id])
+        _ = try await repo.permanentlyDelete(ids: [id])
         #expect(try await repo.search(query: "新关键词").items.isEmpty)
     }
 

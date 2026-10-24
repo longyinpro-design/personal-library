@@ -32,7 +32,7 @@ final class LibraryDeletionTests {
         let managed = try repo.fileURL(for: item)
         #expect(FileManager.default.fileExists(atPath: managed.path))
 
-        let report = try await repo.delete(ids: [id])
+        let report = try await repo.permanentlyDelete(ids: [id])
 
         #expect(report.deleted == 1)
         #expect(report.warnings.isEmpty)
@@ -55,10 +55,10 @@ final class LibraryDeletionTests {
         let attachment = try #require(state.items.first(where: { $0.id == first })?.imageAttachments["a.svg"])
         #expect(FileManager.default.fileExists(atPath: attachment.path))
 
-        _ = try await repo.delete(ids: [first])
+        _ = try await repo.permanentlyDelete(ids: [first])
         #expect(FileManager.default.fileExists(atPath: attachment.path))
 
-        _ = try await repo.delete(ids: [second])
+        _ = try await repo.permanentlyDelete(ids: [second])
         #expect(!FileManager.default.fileExists(atPath: attachment.path))
     }
 
@@ -68,7 +68,7 @@ final class LibraryDeletionTests {
         for index in 0..<3 {
             ids.append(try await repo.saveNote(title: "资料 \(index)", body: "正文", kind: .note))
         }
-        let report = try await repo.delete(ids: ids)
+        let report = try await repo.permanentlyDelete(ids: ids)
         #expect(report.deleted == 3)
         #expect(report.warnings.isEmpty)
         let state = try await repo.snapshot()
@@ -78,7 +78,7 @@ final class LibraryDeletionTests {
 
     @Test func deletingUnknownIDsIsANoOp() async throws {
         let repo = try LibraryRepository(root: root)
-        let report = try await repo.delete(ids: ["missing", "missing"])
+        let report = try await repo.permanentlyDelete(ids: ["missing", "missing"])
         #expect(report.deleted == 0)
         #expect(report.warnings.isEmpty)
         #expect(try await repo.snapshot().activities.isEmpty)
@@ -126,7 +126,7 @@ final class LibraryDeletionTests {
         let database = try Database(url: root.appendingPathComponent("library.sqlite"))
         try database.execute("UPDATE items SET relative_path = '../outside.txt' WHERE id = ?", [id])
 
-        let report = try await repo.delete(ids: [id])
+        let report = try await repo.permanentlyDelete(ids: [id])
         #expect(report.deleted == 1)
         #expect(report.warnings.count == 1)
         #expect(FileManager.default.fileExists(atPath: outside.path))

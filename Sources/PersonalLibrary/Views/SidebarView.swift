@@ -28,6 +28,9 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.plain).disabled(!store.ready)
             }
+            Section {
+                row("回收站", symbol: "trash", scope: .trash, count: store.trashedCount)
+            }
         }
         .listStyle(.sidebar)
         .navigationTitle("个人资料库")

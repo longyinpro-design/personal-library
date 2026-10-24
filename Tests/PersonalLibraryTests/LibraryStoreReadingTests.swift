@@ -42,7 +42,7 @@ struct LibraryStoreReadingTests {
         store.rememberReadingAnchor(.bodyChunk(2), for: kept)
         store.rememberReadingAnchor(.bodyChunk(5), for: removed)
 
-        store.requestDelete([removed])
+        store.requestTrash([removed])
         await store.confirmDelete()
 
         #expect(store.readingAnchor(for: removed) == nil)

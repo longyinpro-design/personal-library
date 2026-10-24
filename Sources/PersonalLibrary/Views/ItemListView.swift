@@ -10,6 +10,7 @@ struct ItemListView: View {
     var body: some View {
         Group {
             if store.scope == .history { history }
+            else if store.scope == .trash { trash }
             else { results }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
@@ -47,7 +48,7 @@ struct ItemListView: View {
                     }
                 }
                 Divider()
-                Button(role: .destructive) { store.requestDelete(ids) } label: {
+                Button(role: .destructive) { store.requestTrash(ids) } label: {
                     Label(items.count == 1 ? "删除" : "删除 \(items.count) 项", systemImage: "trash")
                 }
             }
@@ -55,7 +56,7 @@ struct ItemListView: View {
             guard ids.count == 1, let item = store.items(for: ids).first else { return }
             if item.isEditable { store.edit(item) } else { store.open(item) }
         }
-        .onDeleteCommand { store.requestDeleteSelection() }
+        .onDeleteCommand { store.requestTrashSelection() }
         // Replace the native list and its selection actions together for a new result order.
         // AppKit's incremental insertion of thousands of automatic-height rows blocks the main thread.
         .background(ListLayoutCallback { window in
@@ -179,6 +180,36 @@ struct ItemListView: View {
         table.scrollRowToVisible(index)
     }
 
+    /// Trashed rows keep their copies, so this list only ever restores or destroys.
+    private var trash: some View {
+        List(selection: $store.selection) {
+            ForEach(store.displayedItems) { item in
+                ItemRow(item: item, collection: store.collectionName(item.collectionID), excerpt: "")
+                    .tag(item.id)
+            }
+        }
+        .listStyle(.inset)
+        .contextMenu(forSelectionType: String.self) { ids in
+            if !ids.isEmpty {
+                Button("恢复") { store.restoreFromTrash(ids) }
+                Divider()
+                Button(role: .destructive) { store.requestPermanentDelete(ids) } label: {
+                    Label(ids.count == 1 ? "彻底删除" : "彻底删除 \(ids.count) 项", systemImage: "trash.slash")
+                }
+            }
+        } primaryAction: { ids in
+            guard ids.count == 1, let item = store.items(for: ids).first else { return }
+            store.open(item)
+        }
+        .onDeleteCommand { store.requestPermanentDelete(store.selection) }
+        .overlay {
+            if store.displayedItems.isEmpty {
+                ContentUnavailableView("回收站是空的", systemImage: "trash",
+                                       description: Text("删除的资料会在这里保留 \(LibraryRetention.trashDays) 天，之后自动清理。"))
+            }
+        }
+    }
+
     private var history: some View {
         List(store.snapshot.activities) { activity in
             Label {
@@ -201,12 +232,53 @@ struct ItemListView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
-            if store.scope != .history, store.selection.count > 1 {
+            if store.scope == .trash, !store.selection.isEmpty {
+                trashBar
+                Divider()
+            } else if store.scope != .history, store.selection.count > 1 {
                 bulkBar
+                Divider()
+            }
+            if store.canUndoTrash {
+                undoBar
                 Divider()
             }
             statusBar
         }
+    }
+
+    private var trashBar: some View {
+        HStack(spacing: 14) {
+            Text("已选择 \(store.selection.count) 项")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button { store.restoreFromTrash(store.selection) } label: {
+                Label("恢复", systemImage: "arrow.uturn.backward")
+            }
+            Button(role: .destructive) { store.requestPermanentDelete(store.selection) } label: {
+                Label("彻底删除", systemImage: "trash.slash")
+            }
+        }
+        .buttonStyle(.borderless)
+        .disabled(store.isDeleting || store.isBatchUpdating)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    /// The trash keeps a session-scoped undo until the next destructive action.
+    private var undoBar: some View {
+        HStack(spacing: 10) {
+            Label("已移到回收站", systemImage: "trash").font(.caption).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button("撤销") { store.undoTrash() }
+                .keyboardShortcut("z", modifiers: .command)
+                .help("撤销删除 · ⌘Z")
+            Button("关闭") { store.dismissUndoTrash() }
+                .buttonStyle(.borderless)
+        }
+        .disabled(store.isDeleting)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.bar)
     }
 
     private var bulkBar: some View {
@@ -227,7 +299,7 @@ struct ItemListView: View {
                 Label("整理到", systemImage: "folder")
             }
             .menuStyle(.borderlessButton).fixedSize()
-            Button(role: .destructive) { store.requestDeleteSelection() } label: {
+            Button(role: .destructive) { store.requestTrashSelection() } label: {
                 Label("删除", systemImage: "trash")
             }
         }
@@ -243,7 +315,12 @@ struct ItemListView: View {
             else { Image(systemName: store.ready ? "lock.shield" : "hourglass") }
             Text(store.isDeleting ? "正在删除…" : (store.isSearching ? "正在搜索…" : store.status)).lineLimit(1)
             Spacer(minLength: 0)
-            Text("\(store.snapshot.items.count) 项").monospacedDigit()
+            if store.scope == .trash {
+                Button("清空回收站") { store.requestEmptyTrash() }
+                    .buttonStyle(.borderless)
+                    .disabled(store.trashedCount == 0 || store.isDeleting)
+            }
+            Text("\(store.scope == .trash ? store.trashedCount : store.snapshot.items.count) 项").monospacedDigit()
         }
         .font(.caption2).foregroundStyle(.secondary)
         .padding(.horizontal, 16).padding(.vertical, 10)
