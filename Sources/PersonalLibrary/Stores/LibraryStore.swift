@@ -138,12 +138,11 @@ final class LibraryStore: ObservableObject {
         if let root { self.root = root; return }
         let arguments = ProcessInfo.processInfo.arguments
         let pathIndex = arguments.firstIndex(of: "--library-path")
-        let commandLineRoot = pathIndex.flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
-        if let override = commandLineRoot ?? ProcessInfo.processInfo.environment["PERSONAL_LIBRARY_HOME"], !override.isEmpty {
-            self.root = URL(fileURLWithPath: override, isDirectory: true)
+        if let commandLineRoot = pathIndex.flatMap({ $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }),
+           !commandLineRoot.isEmpty {
+            self.root = URL(fileURLWithPath: commandLineRoot, isDirectory: true)
         } else {
-            self.root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("PersonalLibrary", isDirectory: true)
+            self.root = LibraryLocation.defaultRoot()
         }
     }
 
@@ -650,6 +649,36 @@ final class LibraryStore: ObservableObject {
         for (id, anchor) in batch {
             guard let data = try? encoder.encode(anchor) else { continue }
             try? await repository.setReadingPosition(data, for: id)
+        }
+    }
+
+    /// Used by the menu bar item: same save path as the composer, without a window.
+    @discardableResult
+    func captureNote(title: String, body: String, tags: [String]) -> Task<Void, Never>? {
+        guard ready, let repository else { return nil }
+        let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty || !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let finalTitle = LibraryCapture.normalizeTitle(title, body: body)
+        return Task {
+            do {
+                let id = try await repository.saveNote(title: finalTitle, body: body, kind: .note)
+                let cleaned = LibraryCapture.cleanTags(tags)
+                if !cleaned.isEmpty { _ = try await repository.setTags(cleaned, for: [id]) }
+                try await reload()
+                navigate(.all)
+                selection = [id]
+                status = "已保存「\(finalTitle)」"
+            } catch {
+                errorMessage = error.localizedDescription
+                status = "保存未完成"
+            }
+        }
+    }
+
+    /// Another process (App Intent, Shortcuts) wrote to the library.
+    func refreshAfterExternalChange() {
+        Task {
+            try? await reload()
         }
     }
 
