@@ -84,6 +84,8 @@ final class LibraryStore: ObservableObject {
     @Published var errorMessage: String?
     @Published var status = "正在打开本地资料库…"
     @Published var isImporting = false
+    /// Set when an import found files whose bytes already exist in the library.
+    @Published var pendingImport: LibraryRepository.ImportPreview?
     @Published var isSavingNote = false
     @Published var ready = false
     @Published var focusSearch = false
@@ -258,7 +260,19 @@ final class LibraryStore: ObservableObject {
             ready = true
             status = "所有资料仅保存在这台 Mac"
             purgeExpiredTrash()
+            backfillFingerprints()
         } catch { errorMessage = error.localizedDescription; status = "资料库打开失败" }
+    }
+
+    /// Items imported before version 7 have no fingerprint, so duplicate detection
+    /// would miss them. Hashing happens in the background, a batch at a time.
+    private func backfillFingerprints() {
+        Task { [weak self] in
+            while let repository = self?.repository, !Task.isCancelled {
+                let count = (try? await repository.backfillFingerprints()) ?? 0
+                if count == 0 || Task.isCancelled { return }
+            }
+        }
     }
 
     /// Trashed items past the retention window are removed on launch, never on a
@@ -389,19 +403,60 @@ final class LibraryStore: ObservableObject {
     func importFiles(_ urls: [URL]) -> Task<Void, Never>? {
         guard ready, !isImporting, let repository, !urls.isEmpty else { return nil }
         isImporting = true
-        status = "正在导入 \(urls.count) 个文件并提取正文…"
+        status = "正在核对 \(urls.count) 个文件…"
         return Task {
             defer { isImporting = false }
             do {
-                let report = try await repository.importFiles(urls)
-                try await reload()
-                // Import publishes new data; current navigation and selection still belong to the reader.
-                status = "已导入 \(report.importedIDs.count) 项" + (report.failures.isEmpty ? "，原文件已保留" : "，\(report.failures.count) 项未成功")
-                if !report.warnings.isEmpty { status += "；部分配图未保存" }
-                let messages = report.failures + report.warnings.map { "配图提示：" + $0 }
-                if !messages.isEmpty { errorMessage = messages.joined(separator: "\n\n") }
+                let preview = try await repository.previewImport(urls)
+                if preview.pending.isEmpty {
+                    errorMessage = preview.failures.joined(separator: "\n\n")
+                    status = "没有可导入的文件"
+                    return
+                }
+                // Only stop for a prompt when there is something to decide; a first
+                // import of new files should not cost an extra click.
+                if preview.hasDuplicates {
+                    pendingImport = preview
+                    status = "\(preview.duplicates.count) 个文件已在库中，等待确认"
+                    return
+                }
+                try await finishImport(preview, skippingDuplicates: false)
             } catch { errorMessage = error.localizedDescription; status = "导入未完成" }
         }
+    }
+
+    @discardableResult
+    func resolvePendingImport(keepDuplicates: Bool) -> Task<Void, Never>? {
+        guard let preview = pendingImport, let repository else { return nil }
+        pendingImport = nil
+        isImporting = true
+        status = "正在导入…"
+        return Task {
+            defer { isImporting = false }
+            do { try await finishImport(preview, skippingDuplicates: !keepDuplicates) }
+            catch { errorMessage = error.localizedDescription; status = "导入未完成" }
+        }
+    }
+
+    func cancelPendingImport() {
+        guard pendingImport != nil else { return }
+        pendingImport = nil
+        status = "已取消导入"
+    }
+
+    private func finishImport(_ preview: LibraryRepository.ImportPreview, skippingDuplicates: Bool) async throws {
+        guard let repository else { return }
+        let report = try await repository.importFiles(preview, skippingDuplicates: skippingDuplicates)
+        try await reload()
+        // Import publishes new data; current navigation and selection still belong to the reader.
+        var parts: [String] = []
+        if !report.importedIDs.isEmpty { parts.append("已导入 \(report.importedIDs.count) 项") }
+        if !report.skipped.isEmpty { parts.append("跳过 \(report.skipped.count) 个重复文件") }
+        if !report.failures.isEmpty { parts.append("\(report.failures.count) 项未成功") }
+        status = parts.isEmpty ? "没有导入内容" : parts.joined(separator: "，")
+        if !report.warnings.isEmpty { status += "；部分配图未保存" }
+        let messages = report.failures + report.warnings.map { "配图提示：" + $0 }
+        if !messages.isEmpty { errorMessage = messages.joined(separator: "\n\n") }
     }
 
     func newNote(kind: ItemKind = .note) {

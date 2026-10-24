@@ -59,6 +59,85 @@ struct LibraryStoreImportTests {
         #expect(!store.isImporting)
     }
 
+    @Test func aFirstImportOfNewFilesDoesNotPrompt() async throws {
+        let root = testTemporaryDirectory.appendingPathComponent("fresh-import-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("唯一.md")
+        try "# 唯一的内容".write(to: source, atomically: true, encoding: .utf8)
+        let store = LibraryStore(root: root.appendingPathComponent("library"))
+        await store.load()
+        await store.searchTask?.value
+
+        await store.importFiles([source])?.value
+        #expect(store.pendingImport == nil)
+        #expect(store.displayedItems.count == 1)
+        #expect(store.status == "已导入 1 项")
+    }
+
+    @Test func aSecondImportAsksBeforeCopyingTheSameBytesAgain() async throws {
+        let root = testTemporaryDirectory.appendingPathComponent("dup-import-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("重复.md")
+        try "# 会导入两次".write(to: source, atomically: true, encoding: .utf8)
+        let store = LibraryStore(root: root.appendingPathComponent("library"))
+        await store.load()
+        await store.searchTask?.value
+        await store.importFiles([source])?.value
+
+        await store.importFiles([source])?.value
+        let preview = try #require(store.pendingImport)
+        #expect(preview.duplicates.count == 1)
+        #expect(preview.duplicates.first?.existing.count == 1)
+        #expect(store.displayedItems.count == 1) // Nothing is copied while the prompt is up.
+        #expect(store.status.contains("等待确认"))
+
+        await store.resolvePendingImport(keepDuplicates: false)?.value
+        await store.searchTask?.value
+        #expect(store.pendingImport == nil)
+        #expect(store.displayedItems.count == 1)
+        #expect(store.status.contains("跳过 1 个重复文件"))
+    }
+
+    @Test func keepingTheDuplicateAddsASecondCopy() async throws {
+        let root = testTemporaryDirectory.appendingPathComponent("keep-import-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("保留.md")
+        try "# 保留副本".write(to: source, atomically: true, encoding: .utf8)
+        let store = LibraryStore(root: root.appendingPathComponent("library"))
+        await store.load()
+        await store.searchTask?.value
+        await store.importFiles([source])?.value
+        await store.importFiles([source])?.value
+        #expect(store.pendingImport != nil)
+
+        await store.resolvePendingImport(keepDuplicates: true)?.value
+        await store.searchTask?.value
+        #expect(store.displayedItems.count == 2)
+        #expect(store.status == "已导入 1 项")
+    }
+
+    @Test func cancellingThePromptLeavesTheLibraryUntouched() async throws {
+        let root = testTemporaryDirectory.appendingPathComponent("cancel-import-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("取消.md")
+        try "# 取消导入".write(to: source, atomically: true, encoding: .utf8)
+        let store = LibraryStore(root: root.appendingPathComponent("library"))
+        await store.load()
+        await store.searchTask?.value
+        await store.importFiles([source])?.value
+        await store.importFiles([source])?.value
+        #expect(store.pendingImport != nil)
+
+        store.cancelPendingImport()
+        #expect(store.pendingImport == nil)
+        #expect(store.status == "已取消导入")
+        #expect(store.displayedItems.count == 1)
+    }
+
     @Test func emptyLibrarySelectsImportedResultWithoutExplicitNavigation() async throws {
         let root = testTemporaryDirectory.appendingPathComponent("empty-import-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

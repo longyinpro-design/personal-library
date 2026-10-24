@@ -20,7 +20,7 @@ final class Database {
         try execute("PRAGMA foreign_keys = ON")
         try execute("PRAGMA journal_mode = WAL")
         let version = try rows("PRAGMA user_version").first?["user_version"] ?? "0"
-        guard ["0", "1", "2", "3", "4", "5", "6"].contains(version) else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
+        guard ["0", "1", "2", "3", "4", "5", "6", "7"].contains(version) else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
         try transaction {
             try execute("CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)")
             try execute("""
@@ -42,6 +42,12 @@ final class Database {
                 try execute("ALTER TABLE items ADD COLUMN deleted_at REAL")
             }
             try execute("CREATE INDEX IF NOT EXISTS items_deleted ON items(deleted_at)")
+            // Version 7 keeps a SHA-256 of the imported file next to the item, so a
+            // second import of the same bytes can say so before copying anything.
+            if ["0", "1", "2", "3", "4", "5", "6"].contains(version), try !hasColumn("fingerprint", in: "items") {
+                try execute("ALTER TABLE items ADD COLUMN fingerprint TEXT")
+            }
+            try execute("CREATE INDEX IF NOT EXISTS items_fingerprint ON items(fingerprint)")
             try execute("""
                 CREATE TABLE IF NOT EXISTS markdown_images (
                     item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -92,7 +98,7 @@ final class Database {
             } catch {
                 supportsFTS = false
             }
-            try execute("PRAGMA user_version = 6")
+            try execute("PRAGMA user_version = 7")
         }
     }
 
