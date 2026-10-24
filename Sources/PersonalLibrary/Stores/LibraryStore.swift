@@ -99,8 +99,22 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var isRecognizingText = false
     @Published private(set) var hasPendingRestore = false
     @Published private(set) var pendingRestoreName = ""
+    /// Mirrors the library into Spotlight. Off means the index is emptied.
+    @Published var spotlightEnabled = LibraryStore.spotlightDefault {
+        didSet {
+            guard oldValue != spotlightEnabled, ready else { return }
+            UserDefaults.standard.set(spotlightEnabled, forKey: LibraryStore.spotlightDefaultsKey)
+            syncSpotlight()
+        }
+    }
+    /// Swapped in tests so nothing talks to the Spotlight service.
+    var spotlightSink: any SpotlightSink = SystemSpotlightSink()
+    static let spotlightDefaultsKey = "spotlightIndexEnabled"
+    static let spotlightDefault = UserDefaults.standard.object(forKey: spotlightDefaultsKey) as? Bool ?? true
     let root: URL
     private var repository: LibraryRepository?
+    private var indexedSignatures: [String: String] = [:]
+    private var spotlightTask: Task<Void, Never>?
     private var bodyCache: [String: String] = [:]
     private var readingAnchors: [String: ReadingAnchor] = [:]
     private var suppressSearch = false
@@ -293,6 +307,7 @@ final class LibraryStore: ObservableObject {
             ready = true
             refreshBackups()
             status = restored ? "已从备份恢复，原资料库保留为 \(LibraryBackupStore.safetyCopyName)" : "所有资料仅保存在这台 Mac"
+            syncSpotlight()
             await backupIfDue()
             purgeExpiredTrash()
             backfillFingerprints()
@@ -358,6 +373,78 @@ final class LibraryStore: ObservableObject {
 
     static let ocrBatchSize = 4
     static let ocrLaunchBudget = 24
+
+    // MARK: - Spotlight
+
+    /// Reports the library to Spotlight, one batch per change. Only the title,
+    /// the preview and the tags go out; bodies stay local.
+    private func syncSpotlight() {
+        guard ready else { return }
+        let enabled = spotlightEnabled
+        let documents = enabled ? spotlightDocuments(snapshot.items) : []
+        let signatures = Dictionary(snapshot.items.map { ($0.id, spotlightSignature($0)) }, uniquingKeysWith: { first, _ in first })
+        let previous = indexedSignatures
+        let sink = spotlightSink
+        spotlightTask?.cancel()
+        spotlightTask = Task { [weak self] in
+            if !enabled {
+                await sink.removeAll()
+                guard !Task.isCancelled else { return }
+                self?.indexedSignatures = [:]
+                return
+            }
+            let gone = previous.keys.filter { signatures[$0] == nil }
+            if !gone.isEmpty { await sink.remove(identifiers: Array(gone)) }
+            let changed = documents.filter { previous[$0.id] != signatures[$0.id] }
+            if !changed.isEmpty { await sink.index(changed) }
+            guard !Task.isCancelled else { return }
+            self?.indexedSignatures = signatures
+        }
+    }
+
+    /// Drops the whole index and writes it again, for when it drifted.
+    func rebuildSpotlightIndex() {
+        guard ready, spotlightEnabled else { return }
+        let documents = spotlightDocuments(snapshot.items)
+        let signatures = Dictionary(snapshot.items.map { ($0.id, spotlightSignature($0)) }, uniquingKeysWith: { first, _ in first })
+        let sink = spotlightSink
+        indexedSignatures = [:]
+        spotlightTask?.cancel()
+        Task { [weak self] in
+            await sink.removeAll()
+            if !documents.isEmpty { await sink.index(documents) }
+            guard !Task.isCancelled else { return }
+            self?.indexedSignatures = signatures
+            self?.status = "已重建 Spotlight 索引（\(documents.count) 项）"
+        }
+    }
+
+    /// Opens the item Spotlight handed back. Returns false when it is gone, so
+    /// the system can fall back to launching normally.
+    @discardableResult
+    func openFromSpotlight(_ identifier: String) -> Bool {
+        guard snapshot.items.contains(where: { $0.id == identifier }) else { return false }
+        if scope != .all || !query.isEmpty || kindFilter != nil || listOptions.hasFilters {
+            query = ""
+            kindFilter = nil
+            listOptions = LibraryListOptions()
+            scope = .all
+        }
+        selection = [identifier]
+        return true
+    }
+
+    private func spotlightDocuments(_ items: [LibraryItem]) -> [SpotlightDocument] {
+        items.map {
+            SpotlightDocument(id: $0.id, title: $0.title, summary: $0.preview, keywords: $0.tags)
+        }
+    }
+
+    /// What was last sent for an item. Tags do not touch `updatedAt`, so the
+    /// timestamp cannot tell whether a document still matches.
+    private func spotlightSignature(_ item: LibraryItem) -> String {
+        ([item.title, item.preview] + item.tags).joined(separator: "\u{1F}")
+    }
 
     /// Trashed items past the retention window are removed on launch, never on a
     /// user action, so a long-idle library still reclaims disk space.
@@ -1049,5 +1136,6 @@ final class LibraryStore: ObservableObject {
         for (id, body) in bodyCache { applyBody(body, to: id) }
         suppressSearch = false
         scheduleSearch()
+        syncSpotlight()
     }
 }
