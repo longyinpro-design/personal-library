@@ -43,8 +43,24 @@ struct SettingsView: View {
                 }
                 Text("备份由 SQLite 自身写出（VACUUM INTO），包含笔记、正文、标签与索引。导入到 Files/ 的文件副本不在备份内，原文件仍在原位置。恢复只替换数据库，不会删除这些副本。")
             }
+            Section("文字识别") {
+                LabeledContent("待识别") {
+                    if store.ocrPending == 0 {
+                        Text("没有待识别的图片或扫描件")
+                    } else {
+                        Text("\(store.ocrPending) 项").foregroundStyle(.orange)
+                    }
+                }
+                HStack(spacing: 10) {
+                    Button(store.isRecognizingText ? "正在识别…" : "立即识别") { store.recognizeRemainingText() }
+                        .disabled(store.isRecognizingText || !store.ready || store.ocrPending == 0)
+                    Text("识别在后台进行，图片与扫描件识别完成后即可用正文搜索。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Text("使用 macOS 自带的视觉模型，完全离线，不上传任何图片。扫描件最多识别前 \(LibraryRepository.maximumScannedPages) 页。")
+            }
             Section("第一版支持") {
-                Text("PDF 文字层、Word、RTF 与文本正文搜索；图片与其他格式支持文件名搜索和系统预览。暂不包含 OCR、云同步或 AI 分类。")
+                Text("PDF 文字层、Word、RTF 与文本正文搜索；图片与扫描件用系统视觉模型识别文字；其他格式支持文件名搜索和系统预览。暂不包含云同步或 AI 分类。")
                 Text("每个文件最大 200 MB，最多提取 200 万个字符用于搜索。搜索覆盖当前左侧分类，可选择「全部资料」搜索整个资料库。")
             }
         }

@@ -5,7 +5,7 @@ import Foundation
 final class Database {
     /// Current schema version, written to `PRAGMA user_version`. Backups record
     /// theirs, so this is the one place that knows what a build can read.
-    static let schemaVersion = 8
+    static let schemaVersion = 9
 
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -92,6 +92,11 @@ final class Database {
                 )
                 """)
             try execute("CREATE INDEX IF NOT EXISTS item_tags_tag ON item_tags(tag_id)")
+            // Version 9 records that the on-device recognizer already ran, so a
+            // picture with no words in it is not read again on every launch.
+            if ["0", "1", "2", "3", "4", "5", "6", "7", "8"].contains(version), try !hasColumn("ocr_version", in: "items") {
+                try execute("ALTER TABLE items ADD COLUMN ocr_version INTEGER NOT NULL DEFAULT 0")
+            }
             try execute("""
                 CREATE TABLE IF NOT EXISTS markdown_images (
                     item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,

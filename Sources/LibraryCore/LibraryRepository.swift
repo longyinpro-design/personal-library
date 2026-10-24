@@ -147,7 +147,7 @@ public actor LibraryRepository {
                     catch { report.warnings.append("\(source.lastPathComponent)：\(error.localizedDescription)") }
                 }
                 try publishImages(prepared, id: id) {
-                    try database.execute("INSERT INTO items (id,title,kind,relative_path,body,extraction_note,byte_count,created_at,updated_at,image_base_path,fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?)", [id, source.lastPathComponent, extraction.kind.rawValue, relativePath, extraction.text, extraction.note, String(values.fileSize ?? 0), now, now, imageBase, entry.fingerprint])
+                    try database.execute("INSERT INTO items (id,title,kind,relative_path,body,extraction_note,byte_count,created_at,updated_at,image_base_path,fingerprint,ocr_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [id, source.lastPathComponent, extraction.kind.rawValue, relativePath, extraction.text, extraction.note, String(values.fileSize ?? 0), now, now, imageBase, entry.fingerprint, extraction.usedOCR ? "1" : "0"])
                     try database.execute("INSERT INTO item_sources (item_id,path) VALUES (?,?)", [id, source.standardizedFileURL.path])
                     try record("导入了「\(source.lastPathComponent)」")
                 }
@@ -184,6 +184,45 @@ public actor LibraryRepository {
             updated += 1
         }
         return updated
+    }
+
+    /// Reads text out of pictures and scanned PDFs that were imported before the
+    /// recognizer existed. One bounded batch per call so launch stays quick; the
+    /// caller repeats until it returns zero.
+    @discardableResult
+    public func backfillOCR(limit: Int = 20) throws -> Int {
+        let rows = try database.rows("""
+            SELECT id, relative_path FROM items
+            WHERE ocr_version = 0 AND relative_path IS NOT NULL AND deleted_at IS NULL
+              AND (kind = ? OR lower(relative_path) LIKE '%.pdf')
+            ORDER BY created_at, id LIMIT ?
+            """, [ItemKind.image.rawValue, String(limit)])
+        var processed = 0
+        for row in rows {
+            guard let id = row["id"], let relativePath = row["relative_path"] else { continue }
+            let copy = files.appendingPathComponent(relativePath)
+            guard FileManager.default.fileExists(atPath: copy.path) else {
+                // The file is gone; nothing to read, and retrying forever would
+                // keep the batch busy with the same row.
+                try database.execute("UPDATE items SET ocr_version = 1 WHERE id = ?", [id])
+                continue
+            }
+            let extraction = TextExtractor.extract(copy, temporaryDirectory: root)
+            try database.execute("UPDATE items SET body = ?, extraction_note = ?, ocr_version = 1 WHERE id = ?",
+                                 [extraction.text, extraction.note, id])
+            processed += 1
+        }
+        return processed
+    }
+
+    /// How many items are still waiting for the recognizer.
+    public func ocrPendingCount() throws -> Int {
+        let rows = try database.rows("""
+            SELECT count(*) AS total FROM items
+            WHERE ocr_version = 0 AND relative_path IS NOT NULL AND deleted_at IS NULL
+              AND (kind = ? OR lower(relative_path) LIKE '%.pdf')
+            """, [ItemKind.image.rawValue])
+        return Int(rows.first?["total"] ?? "") ?? 0
     }
 
     private func items(matchingFingerprint fingerprint: String) throws -> [LibraryItem] {
@@ -764,6 +803,8 @@ public actor LibraryRepository {
 
     /// Above this size a short-query scan is worth splitting across cores.
     static let defaultScanMinimumBytes: Int64 = 32 * 1024 * 1024
+    /// Scanned pages the recognizer will read in one PDF, surfaced in Settings.
+    public static let maximumScannedPages = TextExtractor.maximumOCRedPages
     private static let scanWidth = 4
     /// Every term is ANDed into one scan, so this only guards against pathological
     /// queries; it is not a per-term cost.
