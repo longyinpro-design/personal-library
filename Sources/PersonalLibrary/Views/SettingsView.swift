@@ -59,6 +59,16 @@ struct SettingsView: View {
                 }
                 Text("使用 macOS 自带的视觉模型，完全离线，不上传任何图片。扫描件最多识别前 \(LibraryRepository.maximumScannedPages) 页。")
             }
+            Section("Spotlight") {
+                Toggle("在 Spotlight 中搜索资料", isOn: $store.spotlightEnabled)
+                HStack(spacing: 10) {
+                    Button("重建索引") { store.rebuildSpotlightIndex() }
+                        .disabled(!store.ready || !store.spotlightEnabled)
+                    Text("只上报标题、预览与标签，正文不上报。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Text("在聚焦搜索（⌘空格）里能找到资料标题并直接打开。关闭后会把本应用写入的内容从系统索引中移除。")
+            }
             Section("第一版支持") {
                 Text("PDF 文字层、Word、RTF 与文本正文搜索；图片与扫描件用系统视觉模型识别文字；其他格式支持文件名搜索和系统预览。暂不包含云同步或 AI 分类。")
                 Text("每个文件最大 200 MB，最多提取 200 万个字符用于搜索。搜索覆盖当前左侧分类，可选择「全部资料」搜索整个资料库。")
