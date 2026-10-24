@@ -1,3 +1,4 @@
+import CoreSpotlight
 import SwiftUI
 import LibraryCore
 
@@ -116,6 +117,10 @@ struct ContentView: View {
         .onChange(of: store.focusSearch) { _, _ in
             searchPresented = true
             searchFocused = true
+        }
+        .onContinueUserActivity(CSSearchableItemActionType) { activity in
+            guard let identifier = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String else { return }
+            store.openFromSpotlight(identifier)
         }
     }
 
