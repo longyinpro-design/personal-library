@@ -94,6 +94,9 @@ final class LibraryStore: ObservableObject {
     @Published var showNewCollection = false
     @Published private(set) var backups: [LibraryBackup] = []
     @Published private(set) var isBackingUp = false
+    /// Items still waiting for the on-device text recognizer.
+    @Published private(set) var ocrPending = 0
+    @Published private(set) var isRecognizingText = false
     @Published private(set) var hasPendingRestore = false
     @Published private(set) var pendingRestoreName = ""
     let root: URL
@@ -293,6 +296,7 @@ final class LibraryStore: ObservableObject {
             await backupIfDue()
             purgeExpiredTrash()
             backfillFingerprints()
+            backfillOCR()
         } catch { errorMessage = error.localizedDescription; status = "资料库打开失败" }
     }
 
@@ -306,6 +310,54 @@ final class LibraryStore: ObservableObject {
             }
         }
     }
+
+    /// Pictures and scans imported before the recognizer existed get their text
+    /// read in the background. A few items per pass, then the list refreshes once,
+    /// so typing never waits on Vision.
+    private func backfillOCR() {
+        guard let repository else { return }
+        Task { [weak self] in
+            var remaining = (try? await repository.ocrPendingCount()) ?? 0
+            self?.ocrPending = remaining
+            guard remaining > 0 else { return }
+            self?.isRecognizingText = true
+            defer { self?.isRecognizingText = false }
+            var processed = 0
+            while remaining > 0, !Task.isCancelled, processed < Self.ocrLaunchBudget {
+                let count = (try? await repository.backfillOCR(limit: Self.ocrBatchSize)) ?? 0
+                guard count > 0 else { break }
+                processed += count
+                remaining = (try? await repository.ocrPendingCount()) ?? 0
+                self?.ocrPending = remaining
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            if processed > 0 { try? await self?.reload() }
+        }
+    }
+
+    /// Reads everything that is left, for the button in Settings.
+    @discardableResult
+    func recognizeRemainingText() -> Task<Void, Never>? {
+        guard let repository else { return nil }
+        isRecognizingText = true
+        return Task { [weak self] in
+            defer { self?.isRecognizingText = false }
+            var processed = 0
+            while !Task.isCancelled {
+                let count = (try? await repository.backfillOCR(limit: Self.ocrBatchSize)) ?? 0
+                guard count > 0 else { break }
+                processed += count
+                self?.ocrPending = (try? await repository.ocrPendingCount()) ?? 0
+            }
+            if processed > 0 {
+                try? await self?.reload()
+                self?.status = "已识别 \(processed) 项图片或扫描件的文字"
+            }
+        }
+    }
+
+    static let ocrBatchSize = 4
+    static let ocrLaunchBudget = 24
 
     /// Trashed items past the retention window are removed on launch, never on a
     /// user action, so a long-idle library still reclaims disk space.

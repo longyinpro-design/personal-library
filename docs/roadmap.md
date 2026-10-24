@@ -115,7 +115,7 @@ README 说明重复导入「保留为独立副本」，但没有任何提示，�
 
 | 能力 | 说明 | 现状 |
 | --- | --- | --- |
-| OCR | Vision `RecognizeTextRequest`（zh-Hans / en，离线），PDF 用 PDFKit 逐页渲染后识别，结果并入 FTS | 图片与扫描件只按文件名搜索 |
+| OCR | Vision `RecognizeTextRequest`（zh-Hans / en，离线），PDF 用 PDFKit 逐页渲染后识别，结果并入 FTS | 已交付（#19）：图片直接识别，无文字层的 PDF 页逐页识别，旧库后台补做 |
 | Spotlight 索引 | CoreSpotlight 上报标题与摘要，`⌘Space` 直接搜到资料 | 无 |
 | Share Extension / Services | 从 Safari、Finder 一键存入 | 无 |
 | App Intents / 快捷指令 | 「保存到资料库」作为动作 | 无 |

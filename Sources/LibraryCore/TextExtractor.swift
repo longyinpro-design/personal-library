@@ -7,29 +7,62 @@ struct ExtractedText {
     let kind: ItemKind
     let text: String
     let note: String?
+    /// True when the text came out of the on-device recognizer, so the library
+    /// knows not to OCR the item again on the next launch.
+    var usedOCR = false
 }
 
 enum TextExtractor {
     static let maximumCharacters = 2_000_000
+    /// Pages that carry no text layer are rendered and read; a huge scan is
+    /// capped so one file cannot stall an import for minutes.
+    static let maximumOCRedPages = 50
+    /// A page whose text layer is shorter than this is treated as a scan.
+    static let minimumPageCharacters = 8
     static let plainExtensions: Set<String> = ["txt", "md", "markdown", "csv", "tsv", "json", "yaml", "yml", "toml", "xml", "html", "htm", "css", "js", "ts", "tsx", "jsx", "swift", "rs", "go", "py", "sh", "sql", "log", "ini", "conf"]
 
     static func extract(_ url: URL, temporaryDirectory: URL) -> ExtractedText {
         let ext = url.pathExtension.lowercased()
         if UTType(filenameExtension: ext)?.conforms(to: .image) == true {
-            return .init(kind: .image, text: "", note: "图片尚未识别文字，可按文件名搜索。")
+            guard OCRText.isAvailable else {
+                return .init(kind: .image, text: "", note: "此环境无法运行系统文字识别，可按文件名搜索。")
+            }
+            let text = OCRText.recognize(contentsOf: url)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                return .init(kind: .image, text: "", note: "图片里没有识别到文字，可按文件名搜索。", usedOCR: true)
+            }
+            return .init(kind: .image, text: text, note: "正文由视觉识别生成（离线），图片本身请用预览查看。", usedOCR: true)
         }
         if ext == "pdf" {
             guard let pdf = PDFDocument(url: url), !pdf.isLocked else {
                 return .init(kind: .document, text: "", note: "PDF 无法读取或已加密，可打开原文件查看。")
             }
             var text = ""
+            var recognizedPages = 0
+            var skippedPages = 0
             for index in 0..<pdf.pageCount {
-                text += (pdf.page(at: index)?.string ?? "") + "\n"
-                if text.count > maximumCharacters { return bounded(text, kind: .document) }
+                guard let page = pdf.page(at: index) else { continue }
+                let layer = page.string ?? ""
+                if layer.trimmingCharacters(in: .whitespacesAndNewlines).count >= minimumPageCharacters {
+                    text += layer + "\n"
+                } else if OCRText.isAvailable, recognizedPages < maximumOCRedPages {
+                    recognizedPages += 1
+                    let recognized = OCRText.recognize(pdfPage: page)
+                    if !recognized.isEmpty { text += recognized + "\n" }
+                } else {
+                    skippedPages += 1
+                }
+                if text.count > maximumCharacters { return bounded(text, kind: .document, ocrPages: recognizedPages, skipped: skippedPages) }
             }
-            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? .init(kind: .document, text: "", note: "未发现可提取文字，扫描件需 OCR 后才能搜索正文。")
-                : bounded(text, kind: .document)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                let note = recognizedPages > 0
+                    ? "未识别到文字，可按文件名搜索。"
+                    : "未发现可提取文字，可按文件名搜索。"
+                return .init(kind: .document, text: "", note: note, usedOCR: recognizedPages > 0)
+            }
+            return bounded(text, kind: .document, ocrPages: recognizedPages, skipped: skippedPages)
         }
         if ["docx", "doc", "rtf", "odt"].contains(ext) {
             do {
@@ -61,9 +94,19 @@ enum TextExtractor {
         return .init(kind: .other, text: "", note: "此格式支持文件名搜索；可使用系统预览或打开原文件。")
     }
 
-    private static func bounded(_ text: String, kind: ItemKind, truncated: Bool = false) -> ExtractedText {
+    private static func bounded(_ text: String, kind: ItemKind, truncated: Bool = false, ocrPages: Int = 0, skipped: Int = 0) -> ExtractedText {
         let limited = text.count > maximumCharacters || truncated
-        return .init(kind: kind, text: String(text.prefix(maximumCharacters)), note: limited ? "内容较长，仅前 200 万个字符参与正文搜索。完整内容保留在文件中。" : nil)
+        var notes: [String] = []
+        if ocrPages > 0 {
+            notes.append("其中 \(ocrPages) 页为扫描页，已用视觉识别补出文字（离线）。")
+            if skipped > 0 { notes.append("另有 \(skipped) 页未识别。") }
+        }
+        if limited { notes.append("内容较长，仅前 200 万个字符参与正文搜索。完整内容保留在文件中。") }
+        return .init(
+            kind: kind,
+            text: String(text.prefix(maximumCharacters)),
+            note: notes.isEmpty ? nil : notes.joined(separator: " "),
+            usedOCR: ocrPages > 0)
     }
 
     private static func officeText(_ url: URL, temporaryDirectory: URL) throws -> String {
