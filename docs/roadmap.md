@@ -117,7 +117,7 @@ README 说明重复导入「保留为独立副本」，但没有任何提示，�
 | --- | --- | --- |
 | OCR | Vision `RecognizeTextRequest`（zh-Hans / en，离线），PDF 用 PDFKit 逐页渲染后识别，结果并入 FTS | 已交付（#19）：图片直接识别，无文字层的 PDF 页逐页识别，旧库后台补做 |
 | Spotlight 索引 | CoreSpotlight 上报标题、预览与标签，`⌘Space` 直接搜到并打开资料 | 已交付（#20）：增量同步、可在设置关闭或重建 |
-| Share Extension / Services | 从 Safari、Finder 一键存入 | 无 |
+| Share Extension / Services | 从 Safari、Finder 一键存入 | 不做（2026-10 决定）：用户明确不需要，且要新增 Extension target 与额外签名配置 |
 | App Intents / 快捷指令 | 「保存到资料库」作为动作 | 无 |
 | 菜单栏快速捕获 | `MenuBarExtra` + 全局热键，写一条随笔或粘贴剪贴板 | 无 |
 | 收件箱目录监听 | 监听一个文件夹，新文件自动导入 | 已交付（#26）：目录事件 + 1 秒静置判定，按签名记录已处理文件，只处理第一层 |
@@ -150,6 +150,7 @@ README 说明重复导入「保留为独立副本」，但没有任何提示，�
 - **富文本 / 块编辑器**：守住 Markdown 才有差异化。
 - **移动端**：先把 Mac 做深。
 - **SQLCipher 数据库加密**：拖慢 FTS，FileVault 已覆盖绝大多数场景，等有明确需求再评估。
+- **Share Extension / Services**：用户明确不做（2026-10）。从浏览器或 Finder 存入已由拖拽与收件箱目录覆盖，再挂一个 Extension target 只会增加签名与分发负担。
 
 ## 参考
 
