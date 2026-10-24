@@ -13,6 +13,30 @@ final class Database {
     /// future system SQLite is built without it.
     private(set) var supportsFTS = false
 
+    /// A connection that never migrates or writes; used by the parallel scan
+    /// that answers one- and two-character searches.
+    init(readOnly url: URL) throws {
+        guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "无法打开数据库"
+            sqlite3_close(handle)
+            handle = nil
+            throw LibraryError.message(message)
+        }
+        sqlite3_busy_timeout(handle, 5000)
+        try execute("PRAGMA mmap_size = \(Self.mmapBytes)")
+    }
+
+    /// Mapping the file lets the scanning path read pages without a copy.
+    private static let mmapBytes = 256 * 1024 * 1024
+
+    /// Total size of the database file in bytes, used to decide whether a short
+    /// query is worth splitting across cores.
+    func byteSize() throws -> Int64 {
+        let pages = Int64(try rows("PRAGMA page_count").first?["page_count"] ?? "0") ?? 0
+        let size = Int64(try rows("PRAGMA page_size").first?["page_size"] ?? "0") ?? 0
+        return pages * size
+    }
+
     init(url: URL) throws {
         guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "无法打开数据库"
@@ -23,6 +47,7 @@ final class Database {
         sqlite3_busy_timeout(handle, 5000)
         try execute("PRAGMA foreign_keys = ON")
         try execute("PRAGMA journal_mode = WAL")
+        try execute("PRAGMA mmap_size = \(Self.mmapBytes)")
         let version = try rows("PRAGMA user_version").first?["user_version"] ?? "0"
         guard version == "0" || (Int(version) ?? 99) <= Self.schemaVersion else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
         try transaction {
