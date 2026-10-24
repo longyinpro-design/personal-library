@@ -207,6 +207,27 @@ public actor LibraryRepository {
         return try createCollection(name: name)
     }
 
+    // MARK: - Reading position
+
+    /// Every remembered position, keyed by item. Written by the reader as the
+    /// person scrolls; stored as opaque bytes so the app owns the shape.
+    public func readingPositions() throws -> [String: Data] {
+        let rows = try database.rows("SELECT id, reading_position FROM items WHERE reading_position IS NOT NULL")
+        var positions: [String: Data] = [:]
+        for row in rows {
+            guard let id = row["id"], let text = row["reading_position"],
+                  let data = text.data(using: .utf8) else { continue }
+            positions[id] = data
+        }
+        return positions
+    }
+
+    /// Passing nil forgets the position, which is what a trash or delete should do.
+    public func setReadingPosition(_ data: Data?, for id: String) throws {
+        let text = data.flatMap { String(data: $0, encoding: .utf8) }
+        try database.execute("UPDATE items SET reading_position = ? WHERE id = ?", [text, id])
+    }
+
     // MARK: - Library packages
 
     /// Writes one item as a `.plib` folder inside `directory`. Everything is built

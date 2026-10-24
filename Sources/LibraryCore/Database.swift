@@ -5,7 +5,7 @@ import Foundation
 final class Database {
     /// Current schema version, written to `PRAGMA user_version`. Backups record
     /// theirs, so this is the one place that knows what a build can read.
-    static let schemaVersion = 9
+    static let schemaVersion = 10
 
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -96,6 +96,13 @@ final class Database {
             // picture with no words in it is not read again on every launch.
             if ["0", "1", "2", "3", "4", "5", "6", "7", "8"].contains(version), try !hasColumn("ocr_version", in: "items") {
                 try execute("ALTER TABLE items ADD COLUMN ocr_version INTEGER NOT NULL DEFAULT 0")
+            }
+            // Version 10 remembers where reading stopped. The column holds opaque
+            // bytes: the app decides whether that means a Markdown section or a
+            // plain-text chunk, so the shape can change without a migration.
+            if ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"].contains(version),
+               try !hasColumn("reading_position", in: "items") {
+                try execute("ALTER TABLE items ADD COLUMN reading_position TEXT")
             }
             try execute("""
                 CREATE TABLE IF NOT EXISTS markdown_images (

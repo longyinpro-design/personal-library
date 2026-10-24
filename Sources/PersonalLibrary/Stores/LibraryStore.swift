@@ -127,6 +127,8 @@ final class LibraryStore: ObservableObject {
     private var spotlightTask: Task<Void, Never>?
     private var bodyCache: [String: String] = [:]
     private var readingAnchors: [String: ReadingAnchor] = [:]
+    private var pendingPositions: [String: ReadingAnchor] = [:]
+    private var positionFlush: Task<Void, Never>?
     private var suppressSearch = false
     @Published private(set) var bodyLoadingIDs: Set<String> = []
     private var searchGeneration = 0
@@ -314,6 +316,14 @@ final class LibraryStore: ObservableObject {
             let root = root
             repository = try await Task.detached { try LibraryRepository(root: root) }.value
             try await reload()
+            if let repository {
+                let saved = try await repository.readingPositions()
+                let decoder = JSONDecoder()
+                for (id, data) in saved {
+                    guard let anchor = try? decoder.decode(ReadingAnchor.self, from: data) else { continue }
+                    readingAnchors[id] = anchor
+                }
+            }
             ready = true
             refreshBackups()
             status = restored ? "已从备份恢复，原资料库保留为 \(LibraryBackupStore.safetyCopyName)" : "所有资料仅保存在这台 Mac"
@@ -616,6 +626,31 @@ final class LibraryStore: ObservableObject {
 
     func rememberReadingAnchor(_ anchor: ReadingAnchor, for id: String) {
         readingAnchors[id] = anchor
+        pendingPositions[id] = anchor
+        schedulePositionFlush()
+    }
+
+    /// Scrolling produces an anchor every time the visible sections change, so
+    /// writes are batched: one update per quiet second instead of one per frame.
+    private func schedulePositionFlush() {
+        positionFlush?.cancel()
+        positionFlush = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.flushReadingPositions()
+        }
+    }
+
+    /// Called on a timer, before quitting, and at the end of tests.
+    func flushReadingPositions() async {
+        guard let repository, !pendingPositions.isEmpty else { return }
+        let batch = pendingPositions
+        pendingPositions.removeAll()
+        let encoder = JSONEncoder()
+        for (id, anchor) in batch {
+            guard let data = try? encoder.encode(anchor) else { continue }
+            try? await repository.setReadingPosition(data, for: id)
+        }
     }
 
     func chooseFiles() {
@@ -1358,8 +1393,11 @@ final class LibraryStore: ObservableObject {
         let cached = bodyCache
         let next = try await repository.snapshot()
         let ids = Set(next.items.map(\.id))
+        // Trashed items keep their position so restoring returns the reader to it.
+        let live = ids.union(next.trashed.map(\.id))
         bodyCache = cached.filter { ids.contains($0.key) }
-        readingAnchors = readingAnchors.filter { ids.contains($0.key) }
+        readingAnchors = readingAnchors.filter { live.contains($0.key) }
+        pendingPositions = pendingPositions.filter { readingAnchors[$0.key] != nil }
         suppressSearch = true
         snapshot = next
         for (id, body) in bodyCache { applyBody(body, to: id) }
