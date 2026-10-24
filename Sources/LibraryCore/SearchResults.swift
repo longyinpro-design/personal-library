@@ -30,9 +30,43 @@ public struct LibrarySearchResults: Sendable {
     }
 }
 
+/// Where a hit landed. Ranked tiers beat bm25 here because the index is built
+/// with `detail=none`, which keeps no column data to weight a title against a body.
+public enum LibrarySearchRelevance: Int, Sendable, Comparable {
+    case titleExact = 0
+    case titlePrefix = 1
+    case titleAllTerms = 2
+    case titleSomeTerms = 3
+    case bodyOnly = 4
+
+    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+}
+
 public struct LibrarySearchPresentation: Sendable {
     public let excerpt: String
     public let matchingExcerpt: String?
+}
+
+extension LibrarySearch {
+    /// Deterministic tier for one hit, using the same matching rules as `search(_:query:)`.
+    public static func relevance(of item: LibraryItem, query: String) -> LibrarySearchRelevance {
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !terms.isEmpty else { return .bodyOnly }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = item.title
+        if !trimmed.isEmpty,
+           title.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive]) == .orderedSame {
+            return .titleExact
+        }
+        if !trimmed.isEmpty,
+           title.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive, .anchored]) != nil {
+            return .titlePrefix
+        }
+        let titleHits = terms.filter { title.localizedStandardContains($0) }.count
+        if titleHits == terms.count { return .titleAllTerms }
+        if titleHits > 0 { return .titleSomeTerms }
+        return .bodyOnly
+    }
 }
 
 extension LibrarySearch {
