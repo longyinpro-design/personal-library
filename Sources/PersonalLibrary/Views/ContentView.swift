@@ -77,6 +77,7 @@ struct ContentView: View {
             guard store.ready, !store.isImporting else { return false }
             store.importFiles(urls); return true
         } isTargeted: { dropTarget = $0 }
+        .sheet(item: $store.tagEditorRequest) { request in TagEditorView(store: store, request: request) }
         .sheet(item: $store.linkedFilePreview) { file in LinkedFilePreviewView(file: file) }
         .sheet(item: $store.draft) { draft in ComposerView(store: store, initial: draft) }
         .sheet(isPresented: $store.showNewCollection) { CollectionSheet(store: store) }

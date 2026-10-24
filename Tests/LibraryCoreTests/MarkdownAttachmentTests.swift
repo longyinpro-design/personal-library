@@ -195,7 +195,7 @@ struct MarkdownAttachmentTests {
         #expect(restored.reused == 1 && repeated.reused == 1 && repeated.copied == 0)
         #expect(try db.rows("SELECT * FROM items") == before)
         #expect(try db.rows("SELECT * FROM activities") == history)
-        #expect(try db.rows("PRAGMA user_version").first?["user_version"] == "7")
+        #expect(try db.rows("PRAGMA user_version").first?["user_version"] == String(Database.schemaVersion))
         #expect(try db.rows("PRAGMA foreign_key_check").isEmpty)
     }
 

@@ -48,6 +48,7 @@ struct ItemListView: View {
                         Button(collection.name) { store.organize(ids, into: collection.id) }
                     }
                 }
+                Button("标签…") { store.beginTagEditing(ids: ids) }
                 Divider()
                 Button(role: .destructive) { store.requestTrash(ids) } label: {
                     Label(items.count == 1 ? "删除" : "删除 \(items.count) 项", systemImage: "trash")
@@ -506,6 +507,10 @@ private struct ItemRow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack {
                     Text(collection).lineLimit(1)
+                    if !item.tags.isEmpty {
+                        Text(item.tags.map { "#" + $0 }.joined(separator: "  "))
+                            .lineLimit(1).foregroundStyle(.secondary)
+                    }
                     Spacer(minLength: 6)
                     Text(item.updatedAt.formatted(.dateTime.month(.twoDigits).day(.twoDigits)))
                 }.font(.caption).foregroundStyle(.tertiary)

@@ -4,13 +4,16 @@ import Foundation
 public struct LibrarySearchFilter: Sendable, Equatable {
     public var kind: ItemKind?
     public var collectionID: String?
+    /// Tag name to restrict the search to, from a sidebar tag or `tag:名称`.
+    public var tagName: String?
     public var inboxOnly: Bool
     public var favoritesOnly: Bool
     public var recentLimit: Int?
 
-    public init(kind: ItemKind? = nil, collectionID: String? = nil, inboxOnly: Bool = false, favoritesOnly: Bool = false, recentLimit: Int? = nil) {
+    public init(kind: ItemKind? = nil, collectionID: String? = nil, tagName: String? = nil, inboxOnly: Bool = false, favoritesOnly: Bool = false, recentLimit: Int? = nil) {
         self.kind = kind
         self.collectionID = collectionID
+        self.tagName = tagName
         self.inboxOnly = inboxOnly
         self.favoritesOnly = favoritesOnly
         self.recentLimit = recentLimit

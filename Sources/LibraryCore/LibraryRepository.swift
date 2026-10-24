@@ -27,6 +27,7 @@ public actor LibraryRepository {
         var snapshot = LibrarySnapshot()
         let imageRows = Dictionary(grouping: try database.rows("SELECT * FROM markdown_images ORDER BY reference"), by: { $0["item_id"]! })
         let sourceRows = Dictionary(grouping: try database.rows("SELECT * FROM item_sources ORDER BY path"), by: { $0["item_id"]! })
+        let tagRows = Dictionary(grouping: try database.rows("SELECT item_tags.item_id AS item_id, tags.name AS name FROM item_tags JOIN tags ON tags.id = item_tags.tag_id ORDER BY tags.name COLLATE NOCASE"), by: { $0["item_id"]! })
         let columns = """
             id, title, kind, relative_path, substr(body, 1, 240) AS preview,
                    extraction_note, byte_count, created_at, updated_at, collection_id,
@@ -35,9 +36,17 @@ public actor LibraryRepository {
                    instr(body, '](http') > 0 OR instr(body, '<http') > 0 AS has_links
             """
         snapshot.items = try database.rows("SELECT \(columns) FROM items WHERE deleted_at IS NULL ORDER BY updated_at DESC, id")
-            .map { try item(from: $0, imageRows: imageRows, sourceRows: sourceRows) }
+            .map { try item(from: $0, imageRows: imageRows, sourceRows: sourceRows, tagRows: tagRows) }
         snapshot.trashed = try database.rows("SELECT \(columns) FROM items WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id")
-            .map { try item(from: $0, imageRows: imageRows, sourceRows: sourceRows) }
+            .map { try item(from: $0, imageRows: imageRows, sourceRows: sourceRows, tagRows: tagRows) }
+        snapshot.tags = try database.rows("""
+            SELECT tags.id AS id, tags.name AS name, count(items.id) AS count
+            FROM tags
+            LEFT JOIN item_tags ON item_tags.tag_id = tags.id
+            LEFT JOIN items ON items.id = item_tags.item_id AND items.deleted_at IS NULL
+            GROUP BY tags.id, tags.name
+            ORDER BY tags.name COLLATE NOCASE
+            """).map { LibraryTag(id: $0["id"]!, name: $0["name"]!, count: Int($0["count"] ?? "") ?? 0) }
         snapshot.collections = try database.rows("SELECT * FROM collections ORDER BY name COLLATE NOCASE").map {
             LibraryCollection(id: $0["id"]!, name: $0["name"]!)
         }
@@ -48,7 +57,7 @@ public actor LibraryRepository {
     }
 
     private func item(from row: [String: String], imageRows: [String: [[String: String]]],
-                      sourceRows: [String: [[String: String]]]) throws -> LibraryItem {
+                      sourceRows: [String: [[String: String]]], tagRows: [String: [[String: String]]]) throws -> LibraryItem {
         guard let id = row["id"], let title = row["title"], let rawKind = row["kind"], let kind = ItemKind(rawValue: rawKind),
               let created = Double(row["created_at"] ?? ""), let updated = Double(row["updated_at"] ?? ""),
               let size = Int64(row["byte_count"] ?? "") else { throw LibraryError.message("资料库记录格式损坏，请保留数据目录并恢复备份。") }
@@ -56,7 +65,7 @@ public actor LibraryRepository {
             if let path = image["relative_path"] { result[image["reference"]!] = try images.managedURL(path) }
         }
         let issues = (imageRows[id] ?? []).compactMap { image in image["failure"].map { "\(image["reference"]!)：\($0)" } }
-        return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: "", extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] }, preview: row["preview"] ?? "", hasBody: row["has_body"] == "1", hasLinks: row["has_links"] == "1", textLoaded: false, deletedAt: row["deleted_at"].flatMap(Double.init).map { Date(timeIntervalSince1970: $0) })
+        return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: "", extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] }, preview: row["preview"] ?? "", hasBody: row["has_body"] == "1", hasLinks: row["has_links"] == "1", textLoaded: false, tags: (tagRows[id] ?? []).compactMap { $0["name"] }, deletedAt: row["deleted_at"].flatMap(Double.init).map { Date(timeIntervalSince1970: $0) })
     }
 
     /// One file the user asked to import, with the digest that was read off disk
@@ -187,6 +196,104 @@ public actor LibraryRepository {
                                updatedAt: Date(timeIntervalSince1970: Double(row["updated_at"] ?? "") ?? 0),
                                collectionID: nil, favorite: false)
         }
+    }
+
+    // MARK: 标签
+
+    /// Replaces the tags of every listed item in one transaction. Names are
+    /// trimmed and de-duplicated; missing tags are created, and an empty list
+    /// clears the item's tags. Items themselves are never touched.
+    @discardableResult
+    public func setTags(_ names: [String], for ids: [String]) throws -> Int {
+        let cleaned = Self.clean(names)
+        guard !ids.isEmpty else { return 0 }
+        try database.transaction {
+            for id in ids {
+                try database.execute("DELETE FROM item_tags WHERE item_id = ?", [id])
+                for name in cleaned {
+                    guard let tagID = try tagID(named: name, creating: true) else { continue }
+                    try database.execute("INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)", [id, tagID])
+                }
+            }
+            try record(cleaned.isEmpty ? "清空了 \(ids.count) 项资料的标签" : "为 \(ids.count) 项资料设置了标签 " + cleaned.map { "#\($0)" }.joined(separator: " "))
+        }
+        return ids.count
+    }
+
+    /// Adds tags to items without disturbing the ones they already have.
+    @discardableResult
+    public func addTags(_ names: [String], to ids: [String]) throws -> Int {
+        let cleaned = Self.clean(names)
+        guard !ids.isEmpty, !cleaned.isEmpty else { return 0 }
+        try database.transaction {
+            for id in ids {
+                for name in cleaned {
+                    guard let tagID = try tagID(named: name, creating: true) else { continue }
+                    try database.execute("INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)", [id, tagID])
+                }
+            }
+            try record("为 \(ids.count) 项资料加了标签 " + cleaned.map { "#\($0)" }.joined(separator: " "))
+        }
+        return ids.count
+    }
+
+    /// Removes tags from items, leaving the tags (and everything else) in place.
+    @discardableResult
+    public func removeTags(_ names: [String], from ids: [String]) throws -> Int {
+        let cleaned = Self.clean(names)
+        guard !ids.isEmpty, !cleaned.isEmpty else { return 0 }
+        try database.transaction {
+            for id in ids {
+                for name in cleaned {
+                    guard let tagID = try tagID(named: name, creating: false) else { continue }
+                    try database.execute("DELETE FROM item_tags WHERE item_id = ? AND tag_id = ?", [id, tagID])
+                }
+            }
+            try record("从 \(ids.count) 项资料移除了标签 " + cleaned.map { "#\($0)" }.joined(separator: " "))
+        }
+        return ids.count
+    }
+
+    /// Deletes the tag and its links. The items stay exactly as they were.
+    public func deleteTag(id: String) throws {
+        let name = try database.rows("SELECT name FROM tags WHERE id = ?", [id]).first?["name"] ?? "标签"
+        try database.transaction {
+            try database.execute("DELETE FROM tags WHERE id = ?", [id])
+            try record("删除了标签「\(name)」")
+        }
+    }
+
+    public func renameTag(id: String, to name: String) throws {
+        guard let cleaned = Self.clean([name]).first else { throw LibraryError.message("标签名不能为空") }
+        do {
+            try database.execute("UPDATE tags SET name = ? WHERE id = ?", [cleaned, id])
+            try record("重命名了一个标签为「\(cleaned)」")
+        } catch {
+            throw LibraryError.message("已经有叫「\(cleaned)」的标签了")
+        }
+    }
+
+    /// Tag names are single words: the editor splits on spaces and commas, and
+    /// `tag:` search has to stay unambiguous.
+    private static func clean(_ names: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for name in names {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\n", with: " ")
+                .split(whereSeparator: \.isWhitespace).joined()
+            guard !trimmed.isEmpty, trimmed.count <= 32, !trimmed.hasPrefix("tag:") else { continue }
+            if seen.insert(trimmed.lowercased()).inserted { result.append(trimmed) }
+        }
+        return result
+    }
+
+    private func tagID(named name: String, creating: Bool) throws -> String? {
+        if let existing = try database.rows("SELECT id FROM tags WHERE name = ?", [name]).first?["id"] { return existing }
+        guard creating else { return nil }
+        let id = UUID().uuidString
+        try database.execute("INSERT INTO tags (id, name) VALUES (?, ?)", [id, name])
+        return id
     }
 
     public func saveNote(id: String? = nil, title: String, body: String, kind: ItemKind, collectionID: String? = nil) throws -> String {
@@ -536,11 +643,20 @@ public actor LibraryRepository {
     /// Search metadata plus FTS candidates; the full body is only read for rows
     /// that can match, then discarded before results leave the actor.
     public func search(query: String, filter: LibrarySearchFilter = LibrarySearchFilter()) throws -> LibrarySearchResults {
-        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard !terms.isEmpty else { return LibrarySearchResults(query: query) }
+        // `tag:名称` narrows the same way the sidebar does, so clicking a tag and
+        // typing the prefix return the same rows.
+        let split = LibrarySearch.split(query)
+        let tagName = filter.tagName ?? split.tag
+        let words = split.terms
+        let terms = words.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !terms.isEmpty || tagName != nil else { return LibrarySearchResults(query: query) }
 
         var scopeClauses: [String] = ["deleted_at IS NULL"]
         var scopeValues: [String?] = []
+        if let tagName {
+            scopeClauses.append("id IN (SELECT item_tags.item_id FROM item_tags JOIN tags ON tags.id = item_tags.tag_id WHERE tags.name = ?)")
+            scopeValues.append(tagName)
+        }
         if let kind = filter.kind {
             scopeClauses.append("kind = ?")
             scopeValues.append(kind.rawValue)
@@ -569,7 +685,7 @@ public actor LibraryRepository {
             searchValues.append(pattern)
             searchValues.append(pattern)
         }
-        let searchClause = searchClauses.joined(separator: " AND ")
+        let searchClause = searchClauses.isEmpty ? "1=1" : searchClauses.joined(separator: " AND ")
 
         let source = "SELECT rowid AS rowid, * FROM items WHERE \(scopeClause)"
         let sql: String
@@ -611,11 +727,16 @@ public actor LibraryRepository {
                 imageBasePath: row["image_base_path"], preview: String(body.prefix(240)), textLoaded: true
             ))
         }
-        let matched = try LibrarySearch.search(candidates, query: query)
+        guard !terms.isEmpty else {
+            // A tag on its own lists the tag, same order as an unfiltered list.
+            let list = candidates.sorted { $0.updatedAt == $1.updatedAt ? $0.id < $1.id : $0.updatedAt > $1.updatedAt }
+            return LibrarySearchResults(query: query, items: list)
+        }
+        let matched = try LibrarySearch.search(candidates, query: words)
         // A title hit outranks a hit buried in the body; ties fall back to the old
         // updated_at order, so two runs of the same query agree on the list.
         let ranked = matched.items
-            .map { (item: $0, relevance: LibrarySearch.relevance(of: $0, query: query)) }
+            .map { (item: $0, relevance: LibrarySearch.relevance(of: $0, query: words)) }
             .sorted { lhs, rhs in
                 if lhs.relevance != rhs.relevance { return lhs.relevance < rhs.relevance }
                 if lhs.item.updatedAt != rhs.item.updatedAt { return lhs.item.updatedAt > rhs.item.updatedAt }

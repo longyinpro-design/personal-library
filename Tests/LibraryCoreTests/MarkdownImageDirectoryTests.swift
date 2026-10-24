@@ -24,7 +24,7 @@ struct MarkdownImageDirectoryTests {
         }
         for _ in 0..<2 {
             let db = try Database(url: path)
-            #expect(try db.rows("PRAGMA user_version").first?["user_version"] == "7")
+            #expect(try db.rows("PRAGMA user_version").first?["user_version"] == String(Database.schemaVersion))
             #expect(try db.rows("SELECT * FROM items") == before) // nil new column is omitted by rows().
             #expect(try db.rows("SELECT * FROM collections").first?["name"] == "资料")
             #expect(try db.rows("SELECT * FROM activities").first?["message"] == "历史记录")
