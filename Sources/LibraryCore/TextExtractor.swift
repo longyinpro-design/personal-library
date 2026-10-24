@@ -24,11 +24,10 @@ enum TextExtractor {
     static func extract(_ url: URL, temporaryDirectory: URL) -> ExtractedText {
         let ext = url.pathExtension.lowercased()
         if UTType(filenameExtension: ext)?.conforms(to: .image) == true {
-            guard OCRText.isAvailable else {
+            guard let recognized = OCRText.recognize(contentsOf: url) else {
                 return .init(kind: .image, text: "", note: "此环境无法运行系统文字识别，可按文件名搜索。")
             }
-            let text = OCRText.recognize(contentsOf: url)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = recognized.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
                 return .init(kind: .image, text: "", note: "图片里没有识别到文字，可按文件名搜索。", usedOCR: true)
             }
@@ -41,15 +40,21 @@ enum TextExtractor {
             var text = ""
             var recognizedPages = 0
             var skippedPages = 0
+            var recognitionBlocked = false
             for index in 0..<pdf.pageCount {
                 guard let page = pdf.page(at: index) else { continue }
                 let layer = page.string ?? ""
                 if layer.trimmingCharacters(in: .whitespacesAndNewlines).count >= minimumPageCharacters {
                     text += layer + "\n"
-                } else if OCRText.isAvailable, recognizedPages < maximumOCRedPages {
-                    recognizedPages += 1
-                    let recognized = OCRText.recognize(pdfPage: page)
-                    if !recognized.isEmpty { text += recognized + "\n" }
+                } else if !recognitionBlocked, recognizedPages < maximumOCRedPages {
+                    if let recognized = OCRText.recognize(pdfPage: page) {
+                        recognizedPages += 1
+                        if !recognized.isEmpty { text += recognized + "\n" }
+                    } else {
+                        // The recognizer refused to run at all; stop asking.
+                        recognitionBlocked = true
+                        skippedPages += 1
+                    }
                 } else {
                     skippedPages += 1
                 }
@@ -57,9 +62,14 @@ enum TextExtractor {
             }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
-                let note = recognizedPages > 0
-                    ? "未识别到文字，可按文件名搜索。"
-                    : "未发现可提取文字，可按文件名搜索。"
+                let note: String
+                if recognitionBlocked {
+                    note = "此环境无法运行系统文字识别，可按文件名搜索。"
+                } else if recognizedPages > 0 {
+                    note = "未识别到文字，可按文件名搜索。"
+                } else {
+                    note = "未发现可提取文字，可按文件名搜索。"
+                }
                 return .init(kind: .document, text: "", note: note, usedOCR: recognizedPages > 0)
             }
             return bounded(text, kind: .document, ocrPages: recognizedPages, skipped: skippedPages)

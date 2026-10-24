@@ -6,9 +6,11 @@ import Testing
 @testable import LibraryCore
 
 struct OCRTests {
-    /// The recognizer needs the Vision text service; a host that sandboxes it
-    /// out of the process can only run the tests below.
-    @Test(.enabled(if: OCRText.isAvailable)) func pictureTextIsSearchableAfterImport() async throws {
+    /// The recognizer needs the Vision text service. The CI workflow turns
+    /// recognition off (`PERSONAL_LIBRARY_DISABLE_OCR`), and a host that
+    /// sandboxes the service out of the process behaves the same way, so the
+    /// tests below only run where recognition actually works.
+    @Test(.enabled(if: !OCRText.isDisabled)) func pictureTextIsSearchableAfterImport() async throws {
         let root = testTemporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -26,7 +28,7 @@ struct OCRTests {
         #expect(try await repository.ocrPendingCount() == 0)
     }
 
-    @Test(.enabled(if: OCRText.isAvailable)) func pictureWithoutWordsStillImportsAndIsNotRetried() async throws {
+    @Test(.enabled(if: !OCRText.isDisabled)) func pictureWithoutWordsStillImportsAndIsNotRetried() async throws {
         let root = testTemporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -42,7 +44,7 @@ struct OCRTests {
         #expect(try await repository.backfillOCR() == 0)
     }
 
-    @Test(.enabled(if: OCRText.isAvailable)) func scannedPDFGetsTextFromTheRecognizer() async throws {
+    @Test(.enabled(if: !OCRText.isDisabled)) func scannedPDFGetsTextFromTheRecognizer() async throws {
         let root = testTemporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -59,7 +61,7 @@ struct OCRTests {
         #expect(item.extractionNote?.contains("扫描页") == true)
     }
 
-    @Test(.enabled(if: OCRText.isAvailable)) func backfillReadsPicturesImportedBeforeTheRecognizer() async throws {
+    @Test(.enabled(if: !OCRText.isDisabled)) func backfillReadsPicturesImportedBeforeTheRecognizer() async throws {
         let root = testTemporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

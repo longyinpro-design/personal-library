@@ -29,6 +29,10 @@ jobs:
           swift --version
 
       - name: Run tests
+        # The hosted runner has no on-device text model, and Vision has hung
+        # there before; recognition stays off, so those tests skip themselves.
+        env:
+          PERSONAL_LIBRARY_DISABLE_OCR: "1"
         run: ./script/build_and_run.sh --test
 
       - name: Build app bundle

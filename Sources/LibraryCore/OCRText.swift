@@ -8,7 +8,10 @@ import Vision
 /// model. Everything here is local: no network, no language model download
 /// beyond the ones macOS ships with.
 enum OCRText {
-    static let languages = ["zh-Hans", "en-US"]
+    /// The hosted CI runner has no on-device text model and has hung inside
+    /// Vision before, so the test workflow turns this on. The shipped app
+    /// never sets it, and recognition stays fully local either way.
+    static let isDisabled = ProcessInfo.processInfo.environment["PERSONAL_LIBRARY_DISABLE_OCR"] == "1"
     /// Vision takes a long time on very large frames while reading nothing
     /// extra, so images and pages are scaled down to this budget first.
     static let maximumPixels = 40_000_000
@@ -16,32 +19,10 @@ enum OCRText {
     static let thumbnailPixels = 3_000
     static let pageScale: CGFloat = 2
 
-    /// Whether the on-device text service answers in this process. A sandboxed
-    /// host can block it, so extraction checks first and falls back to filename
-    /// search instead of failing the import.
-    static let isAvailable: Bool = {
-        guard let image = probeImage() else { return false }
-        do {
-            // Probe with the exact configuration real recognition uses: a host
-            // may allow a cheaper level while blocking the accurate model.
-            try VNImageRequestHandler(cgImage: image, options: [:]).perform([makeRequest()])
-            return true
-        } catch { return false }
-    }()
-
-    private static func probeImage() -> CGImage? {
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(
-                data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
-                space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
-        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
-        return context.makeImage()
-    }
-
     /// Recognizes text in a picture on disk. Returns an empty string when the
-    /// file cannot be decoded or holds no text; callers treat both the same.
-    static func recognize(contentsOf url: URL) -> String {
+    /// file cannot be decoded or holds no text, and nil when the recognizer
+    /// itself refuses to run, so callers can say which one happened.
+    static func recognize(contentsOf url: URL) -> String? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return "" }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -55,7 +36,7 @@ enum OCRText {
 
     /// Renders one PDF page and recognizes it. Used for pages that carry no
     /// text layer, which is what a scan looks like to PDFKit.
-    static func recognize(pdfPage page: PDFPage) -> String {
+    static func recognize(pdfPage page: PDFPage) -> String? {
         let bounds = page.bounds(for: .mediaBox)
         guard bounds.width >= 1, bounds.height >= 1 else { return "" }
         var scale = pageScale
@@ -81,15 +62,17 @@ enum OCRText {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
-        let supported = (try? request.supportedRecognitionLanguages()) ?? []
-        if supported.contains("zh-Hans") { request.recognitionLanguages = languages }
+        // Asking supportedRecognitionLanguages() can stall on a hollow CI
+        // runner; detecting the language in the picture avoids the question.
+        request.automaticallyDetectsLanguage = true
         return request
     }
 
-    static func recognize(in image: CGImage) -> String {
+    static func recognize(in image: CGImage) -> String? {
+        guard !isDisabled else { return nil }
         let request = makeRequest()
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        do { try handler.perform([request]) } catch { return "" }
+        do { try handler.perform([request]) } catch { return nil }
         // Vision reports boxes in a normalized space whose origin sits at the
         // bottom left, so a larger `maxY` means higher on the page.
         let observations = (request.results ?? []).sorted { lhs, rhs in
