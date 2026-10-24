@@ -69,17 +69,26 @@ struct ContentView: View {
         .alert("操作未完成", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("好", role: .cancel) { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
-        .confirmationDialog("删除所选资料？",
+        .confirmationDialog(store.pendingDeletionIsPermanent ? "彻底删除所选资料？" : "删除所选资料？",
                             isPresented: Binding(get: { !store.pendingDeletion.isEmpty },
                                                  set: { if !$0 { store.cancelDelete() } }),
                             titleVisibility: .visible) {
-            Button("删除 \(store.pendingDeletion.count) 项", role: .destructive) {
+            Button(store.pendingDeletionIsPermanent ? "彻底删除 \(store.pendingDeletion.count) 项" : "移到回收站",
+                   role: .destructive) {
                 let ids = store.pendingDeletion
                 Task { await store.confirmDelete(ids) }
             }
             Button("取消", role: .cancel) { store.cancelDelete() }
         } message: {
-            Text("只删除资料库内的副本与配图，原始文件仍保留在原位置。此操作无法撤销。")
+            Text(store.pendingDeletionIsPermanent
+                 ? "会连同资料库内的副本与配图一起删除，无法恢复。原始文件仍保留在原位置。"
+                 : "资料会移到回收站，\(LibraryRetention.trashDays) 天内可以恢复。原始文件仍保留在原位置。")
+        }
+        .confirmationDialog("清空回收站？", isPresented: $store.confirmEmptyTrash, titleVisibility: .visible) {
+            Button("彻底删除 \(store.trashedCount) 项", role: .destructive) { store.emptyTrash() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("回收站中的资料会连同副本与配图一起删除，无法恢复。")
         }
         .onChange(of: store.focusSearch) { _, _ in
             searchPresented = true

@@ -20,7 +20,7 @@ final class Database {
         try execute("PRAGMA foreign_keys = ON")
         try execute("PRAGMA journal_mode = WAL")
         let version = try rows("PRAGMA user_version").first?["user_version"] ?? "0"
-        guard ["0", "1", "2", "3", "4", "5"].contains(version) else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
+        guard ["0", "1", "2", "3", "4", "5", "6"].contains(version) else { throw LibraryError.message("资料库版本较新，请使用更新版本的 App 打开。") }
         try transaction {
             try execute("CREATE TABLE IF NOT EXISTS collections (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)")
             try execute("""
@@ -32,9 +32,16 @@ final class Database {
                 )
                 """)
             try execute("CREATE TABLE IF NOT EXISTS activities (id TEXT PRIMARY KEY, message TEXT NOT NULL, date REAL NOT NULL)")
-            if ["0", "1"].contains(version) {
+            if ["0", "1"].contains(version), try !hasColumn("image_base_path", in: "items") {
                 try execute("ALTER TABLE items ADD COLUMN image_base_path TEXT")
             }
+            // Version 6 moved deletion from a DELETE statement to a column, so a
+            // mis-deletion stays recoverable for 30 days. A half-applied upgrade can
+            // leave the column behind, so the check also keeps the migration rerunnable.
+            if ["0", "1", "2", "3", "4", "5"].contains(version), try !hasColumn("deleted_at", in: "items") {
+                try execute("ALTER TABLE items ADD COLUMN deleted_at REAL")
+            }
+            try execute("CREATE INDEX IF NOT EXISTS items_deleted ON items(deleted_at)")
             try execute("""
                 CREATE TABLE IF NOT EXISTS markdown_images (
                     item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -76,18 +83,26 @@ final class Database {
                         INSERT INTO items_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
                     END
                     """)
-                if version != "5" {
+                // The trigram schema last changed at version 5. Rebuild once for older
+                // libraries; rebuild every launch when the check tracks the schema number.
+                if let current = Int(version), current < 5 {
                     try execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
                 }
                 supportsFTS = true
             } catch {
                 supportsFTS = false
             }
-            try execute("PRAGMA user_version = 5")
+            try execute("PRAGMA user_version = 6")
         }
     }
 
     deinit { sqlite3_close(handle) }
+
+    /// An upgrade interrupted between the ALTER and the version bump repeats the
+    /// ALTER on the next launch, so each column add is keyed off the table shape.
+    private func hasColumn(_ name: String, in table: String) throws -> Bool {
+        try rows("PRAGMA table_info(\(table))").contains { $0["name"] == name }
+    }
 
     func execute(_ sql: String, _ values: [String?] = []) throws {
         _ = try rows(sql, values)

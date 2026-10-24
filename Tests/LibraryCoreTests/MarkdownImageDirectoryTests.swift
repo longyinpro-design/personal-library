@@ -11,7 +11,9 @@ struct MarkdownImageDirectoryTests {
         let before: [[String: String]]
         do {
             let old = try Database(url: path)
+            try old.execute("DROP INDEX IF EXISTS items_deleted")
             try old.execute("ALTER TABLE items DROP COLUMN image_base_path")
+            try old.execute("ALTER TABLE items DROP COLUMN deleted_at")
             try old.execute("PRAGMA user_version = 1")
             try old.execute("INSERT INTO collections VALUES ('c', '资料')")
             try old.execute("INSERT INTO items VALUES ('id','旧笔记','note',NULL,'中文原文',NULL,12,100,200,'c',1)")
@@ -20,7 +22,7 @@ struct MarkdownImageDirectoryTests {
         }
         for _ in 0..<2 {
             let db = try Database(url: path)
-            #expect(try db.rows("PRAGMA user_version").first?["user_version"] == "5")
+            #expect(try db.rows("PRAGMA user_version").first?["user_version"] == "6")
             #expect(try db.rows("SELECT * FROM items") == before) // nil new column is omitted by rows().
             #expect(try db.rows("SELECT * FROM collections").first?["name"] == "资料")
             #expect(try db.rows("SELECT * FROM activities").first?["message"] == "历史记录")

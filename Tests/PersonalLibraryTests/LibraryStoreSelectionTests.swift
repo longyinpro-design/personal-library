@@ -56,14 +56,16 @@ struct LibraryStoreSelectionTests {
         await store.searchTask?.value
         store.selection = [first, second]
 
-        store.requestDeleteSelection()
+        store.requestTrashSelection()
         #expect(store.pendingDeletion == [first, second])
+        #expect(!store.pendingDeletionIsPermanent)
         await store.confirmDelete()
 
         #expect(store.snapshot.items.isEmpty)
+        #expect(store.snapshot.trashed.count == 2)
         #expect(store.selection.isEmpty)
         #expect(!store.isDeleting)
-        #expect(store.status == "已删除 2 项资料，原文件保留")
+        #expect(store.status == "已将 2 项移到回收站，\(LibraryRetention.trashDays) 天内可恢复")
     }
 
     @Test func batchFavoriteUpdatesAllRows() async throws {

@@ -19,21 +19,15 @@ public actor LibraryRepository {
         var snapshot = LibrarySnapshot()
         let imageRows = Dictionary(grouping: try database.rows("SELECT * FROM markdown_images ORDER BY reference"), by: { $0["item_id"]! })
         let sourceRows = Dictionary(grouping: try database.rows("SELECT * FROM item_sources ORDER BY path"), by: { $0["item_id"]! })
-        snapshot.items = try database.rows("""
-            SELECT id, title, kind, relative_path, substr(body, 1, 240) AS preview,
+        let columns = """
+            id, title, kind, relative_path, substr(body, 1, 240) AS preview,
                    extraction_note, byte_count, created_at, updated_at, collection_id,
-                   favorite, image_base_path
-            FROM items ORDER BY updated_at DESC, id
-            """).map { row in
-            guard let id = row["id"], let title = row["title"], let rawKind = row["kind"], let kind = ItemKind(rawValue: rawKind),
-                  let created = Double(row["created_at"] ?? ""), let updated = Double(row["updated_at"] ?? ""),
-                  let size = Int64(row["byte_count"] ?? "") else { throw LibraryError.message("资料库记录格式损坏，请保留数据目录并恢复备份。") }
-            let attached = try (imageRows[id] ?? []).reduce(into: [String: URL]()) { result, image in
-                if let path = image["relative_path"] { result[image["reference"]!] = try images.managedURL(path) }
-            }
-            let issues = (imageRows[id] ?? []).compactMap { image in image["failure"].map { "\(image["reference"]!)：\($0)" } }
-            return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: "", extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] }, preview: row["preview"] ?? "", textLoaded: false)
-        }
+                   favorite, image_base_path, deleted_at
+            """
+        snapshot.items = try database.rows("SELECT \(columns) FROM items WHERE deleted_at IS NULL ORDER BY updated_at DESC, id")
+            .map { try item(from: $0, imageRows: imageRows, sourceRows: sourceRows) }
+        snapshot.trashed = try database.rows("SELECT \(columns) FROM items WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id")
+            .map { try item(from: $0, imageRows: imageRows, sourceRows: sourceRows) }
         snapshot.collections = try database.rows("SELECT * FROM collections ORDER BY name COLLATE NOCASE").map {
             LibraryCollection(id: $0["id"]!, name: $0["name"]!)
         }
@@ -41,6 +35,18 @@ public actor LibraryRepository {
             LibraryActivity(id: $0["id"]!, message: $0["message"]!, date: Date(timeIntervalSince1970: Double($0["date"]!)!))
         }
         return snapshot
+    }
+
+    private func item(from row: [String: String], imageRows: [String: [[String: String]]],
+                      sourceRows: [String: [[String: String]]]) throws -> LibraryItem {
+        guard let id = row["id"], let title = row["title"], let rawKind = row["kind"], let kind = ItemKind(rawValue: rawKind),
+              let created = Double(row["created_at"] ?? ""), let updated = Double(row["updated_at"] ?? ""),
+              let size = Int64(row["byte_count"] ?? "") else { throw LibraryError.message("资料库记录格式损坏，请保留数据目录并恢复备份。") }
+        let attached = try (imageRows[id] ?? []).reduce(into: [String: URL]()) { result, image in
+            if let path = image["relative_path"] { result[image["reference"]!] = try images.managedURL(path) }
+        }
+        let issues = (imageRows[id] ?? []).compactMap { image in image["failure"].map { "\(image["reference"]!)：\($0)" } }
+        return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: "", extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] }, preview: row["preview"] ?? "", textLoaded: false, deletedAt: row["deleted_at"].flatMap(Double.init).map { Date(timeIntervalSince1970: $0) })
     }
 
     public func importFiles(_ urls: [URL]) throws -> ImportReport {
@@ -165,9 +171,57 @@ public actor LibraryRepository {
         }
     }
 
+    /// Moves items to the trash. The row, its managed copy, and its archived
+    /// images stay where they are, so restoring is a single column update.
+    @discardableResult
+    public func moveToTrash(ids: [String]) throws -> Int {
+        let ids = Array(Set(ids)).filter { !$0.isEmpty }
+        guard !ids.isEmpty else { return 0 }
+        var titles: [String] = []
+        try database.transaction {
+            for chunk in Self.chunks(ids) {
+                let placeholders = Self.placeholders(chunk.count)
+                titles += try database.rows("SELECT title FROM items WHERE id IN (\(placeholders)) AND deleted_at IS NULL",
+                                            Self.optional(chunk)).compactMap { $0["title"] }
+                try database.execute("UPDATE items SET deleted_at = ? WHERE id IN (\(placeholders)) AND deleted_at IS NULL",
+                                     [String(Date().timeIntervalSince1970)] + Self.optional(chunk))
+            }
+            if titles.count == 1 {
+                try record("将「\(titles[0])」移到回收站")
+            } else if !titles.isEmpty {
+                try record("将 \(titles.count) 项资料移到回收站")
+            }
+        }
+        return titles.count
+    }
+
+    /// Puts trashed items back in place. Nothing was moved, so the original
+    /// collection, favorite state, copies, and archived images are already intact.
+    @discardableResult
+    public func restoreFromTrash(ids: [String]) throws -> Int {
+        let ids = Array(Set(ids)).filter { !$0.isEmpty }
+        guard !ids.isEmpty else { return 0 }
+        var titles: [String] = []
+        try database.transaction {
+            for chunk in Self.chunks(ids) {
+                let placeholders = Self.placeholders(chunk.count)
+                titles += try database.rows("SELECT title FROM items WHERE id IN (\(placeholders)) AND deleted_at IS NOT NULL",
+                                            Self.optional(chunk)).compactMap { $0["title"] }
+                try database.execute("UPDATE items SET deleted_at = NULL WHERE id IN (\(placeholders))", Self.optional(chunk))
+            }
+            if titles.count == 1 {
+                try record("恢复了「\(titles[0])」")
+            } else if !titles.isEmpty {
+                try record("恢复了 \(titles.count) 项资料")
+            }
+        }
+        return titles.count
+    }
+
     /// Removes database rows, managed file copies, and archived images that no
     /// remaining item references. Original files outside the library are untouched.
-    public func delete(ids: [String]) throws -> LibraryDeletionReport {
+    /// This is the only path that deletes copies, so it stays off the delete button.
+    public func permanentlyDelete(ids: [String]) throws -> LibraryDeletionReport {
         let ids = Array(Set(ids)).filter { !$0.isEmpty }
         var report = LibraryDeletionReport()
         guard !ids.isEmpty else { return report }
@@ -221,6 +275,22 @@ public actor LibraryRepository {
             }
         }
         return report
+    }
+
+    public func emptyTrash() throws -> LibraryDeletionReport {
+        let ids = try database.rows("SELECT id FROM items WHERE deleted_at IS NOT NULL").compactMap { $0["id"] }
+        return try permanentlyDelete(ids: ids)
+    }
+
+    /// Called once per launch: trashed items older than the retention window are
+    /// physically removed with their copies.
+    @discardableResult
+    public func purgeExpiredTrash(olderThan interval: TimeInterval = LibraryRetention.trash) throws -> LibraryDeletionReport {
+        let cutoff = String(Date().timeIntervalSince1970 - interval)
+        let ids = try database.rows("SELECT id FROM items WHERE deleted_at IS NOT NULL AND deleted_at < ?", [cutoff])
+            .compactMap { $0["id"] }
+        guard !ids.isEmpty else { return LibraryDeletionReport() }
+        return try permanentlyDelete(ids: ids)
     }
 
     @discardableResult
@@ -371,7 +441,7 @@ public actor LibraryRepository {
         let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
         guard !terms.isEmpty else { return LibrarySearchResults(query: query) }
 
-        var scopeClauses: [String] = []
+        var scopeClauses: [String] = ["deleted_at IS NULL"]
         var scopeValues: [String?] = []
         if let kind = filter.kind {
             scopeClauses.append("kind = ?")

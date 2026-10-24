@@ -42,6 +42,9 @@ public struct LibraryItem: Identifiable, Sendable {
     public var preview: String = ""
     /// False until the reader asks for this item's body.
     public var textLoaded: Bool = true
+    /// Set while the item sits in the trash. Trashed items stay on disk for 30 days.
+    public var deletedAt: Date? = nil
+    public var isTrashed: Bool { deletedAt != nil }
     public var isEditable: Bool { kind == .note || kind == .thought }
     public var usesMarkdown: Bool { isEditable || ["MD", "MARKDOWN"].contains(fileExtension) }
     public var fileExtension: String {
@@ -73,6 +76,9 @@ public struct LibraryActivity: Identifiable, Sendable {
 
 public struct LibrarySnapshot: Sendable {
     public var items: [LibraryItem] = []
+    /// Items in the trash, newest deletion first. Kept apart so counts and
+    /// totals never include them.
+    public var trashed: [LibraryItem] = []
     public var collections: [LibraryCollection] = []
     public var activities: [LibraryActivity] = []
     public init() {}
@@ -99,6 +105,13 @@ public struct MarkdownImageCopyReport: Sendable {
     public var summary: String {
         "已保存 \(saved) 个配图引用" + (failures.isEmpty ? "" : "，\(failures.count) 个未能更新")
     }
+}
+
+public enum LibraryRetention {
+    /// Trashed items stay recoverable this many days before the launch purge
+    /// removes their rows and managed copies.
+    public static let trashDays = 30
+    public static let trash: TimeInterval = TimeInterval(trashDays) * 24 * 60 * 60
 }
 
 public enum LibraryError: LocalizedError {

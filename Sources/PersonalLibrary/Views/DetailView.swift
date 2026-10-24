@@ -58,6 +58,7 @@ struct DetailView: View {
     private func reader(_ item: LibraryItem) -> some View {
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
+                if item.isTrashed { trashBanner(item) }
                 if findVisible { findBar(proxy: proxy) }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
@@ -212,7 +213,10 @@ struct DetailView: View {
                 Label(item.favorite ? "取消收藏" : "收藏", systemImage: item.favorite ? "star.fill" : "star")
             }.help(item.favorite ? "取消收藏" : "收藏")
             Menu {
-                if item.isEditable {
+                if item.isTrashed {
+                    Button { store.restoreFromTrash([item.id]) } label: { Label("移出回收站", systemImage: "arrow.uturn.backward") }
+                    Button { store.export(item) } label: { Label("导出为 Markdown…", systemImage: "square.and.arrow.up") }
+                } else if item.isEditable {
                     Button { store.edit(item) } label: { Label("编辑", systemImage: "square.and.pencil") }
                     Button { store.export(item) } label: { Label("导出为 Markdown…", systemImage: "square.and.arrow.up") }
                 } else {
@@ -222,6 +226,19 @@ struct DetailView: View {
             } label: { Label("资料操作", systemImage: "ellipsis") }
             .help("资料操作")
         }
+    }
+
+    private func trashBanner(_ item: LibraryItem) -> some View {
+        HStack(spacing: 10) {
+            Label("在回收站中，\(LibraryRetention.trashDays) 天后自动清理", systemImage: "trash")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button("恢复") { store.restoreFromTrash([item.id]) }
+                .help("移出回收站")
+                .disabled(store.isDeleting)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 8)
+        .background(.bar)
     }
 
     private func findBar(proxy: ScrollViewProxy) -> some View {
@@ -365,7 +382,9 @@ struct DetailView: View {
             Text("\(item.kind.label)  ·  \(item.updatedAt.formatted(date: .long, time: .omitted))")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack(spacing: 10) {
-                if item.isEditable {
+                if item.isTrashed {
+                    EmptyView()
+                } else if item.isEditable {
                     Button { store.edit(item) } label: { Label("编辑\(item.kind.label)", systemImage: "square.and.pencil") }
                 } else {
                     Button("打开文件") { store.open(item) }
@@ -450,13 +469,13 @@ private struct MultiSelectionDetail: View {
                     Label("整理到", systemImage: "folder")
                 }
                 .menuStyle(.borderlessButton).fixedSize()
-                Button(role: .destructive) { store.requestDeleteSelection() } label: {
+                Button(role: .destructive) { store.requestTrashSelection() } label: {
                     Label("删除", systemImage: "trash")
                 }
             }
             .controlSize(.large)
             .disabled(store.isBatchUpdating || store.isDeleting)
-            Text("删除只移除资料库内的副本与配图，原始文件仍保留在原位置。")
+            Text("删除会把资料移到回收站并保留 \(LibraryRetention.trashDays) 天，原始文件仍保留在原位置。")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

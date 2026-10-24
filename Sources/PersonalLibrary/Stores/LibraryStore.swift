@@ -5,7 +5,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum LibraryScope: Hashable, Sendable {
-    case recent, all, inbox, notes, thoughts, favorites, history, collection(String)
+    case recent, all, inbox, notes, thoughts, favorites, history, trash, collection(String)
     var title: String {
         switch self {
         case .recent: return "最近添加"
@@ -15,6 +15,7 @@ enum LibraryScope: Hashable, Sendable {
         case .thoughts: return "随笔"
         case .favorites: return "已收藏"
         case .history: return "整理记录"
+        case .trash: return "回收站"
         case .collection: return "目录"
         }
     }
@@ -60,8 +61,13 @@ final class LibraryStore: ObservableObject {
         }
     }
     @Published var pendingDeletion: Set<String> = []
+    /// True when the pending confirmation will destroy copies instead of trashing them.
+    private(set) var pendingDeletionIsPermanent = false
     @Published private(set) var isDeleting = false
     @Published private(set) var isBatchUpdating = false
+    /// Items trashed in this session, offered back through the undo banner.
+    @Published private(set) var undoableTrash: Set<String> = []
+    @Published var confirmEmptyTrash = false
     var selectedID: String? {
         get { selection.count == 1 ? selection.first : nil }
         set {
@@ -110,6 +116,10 @@ final class LibraryStore: ObservableObject {
     }
 
     var displayedItems: [LibraryItem] { searchResults.items }
+    var trashedItems: [LibraryItem] { snapshot.trashed }
+    var trashedCount: Int { snapshot.trashed.count }
+    /// Undo stays available until another destructive action or a scope change.
+    var canUndoTrash: Bool { !undoableTrash.isEmpty && !isDeleting && draft == nil }
 
     /// One cancellable request per input. Metadata searches stay on the repository
     /// actor; only the test-only in-memory fallback builds a detached worker.
@@ -118,12 +128,13 @@ final class LibraryStore: ObservableObject {
         let generation = searchGeneration
         searchTask?.cancel()
         let items = snapshot.items
+        let trashed = snapshot.trashed
         let scope = scope
         let kind = kindFilter
         let query = query
         let repository = repository
         let filter = searchFilter(for: scope, kind: kind)
-        isSearching = scope != .history
+        isSearching = scope != .history && scope != .trash
         searchTask = Task { [weak self] in
             do {
                 if debounce && !query.isEmpty { try await Task.sleep(for: .milliseconds(120)) }
@@ -131,6 +142,8 @@ final class LibraryStore: ObservableObject {
                 let results: LibrarySearchResults
                 if scope == .history {
                     results = LibrarySearchResults(query: query)
+                } else if scope == .trash {
+                    results = Self.trashResults(trashed, query: query, kind: kind)
                 } else if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     results = try Self.metadataResults(items: items, scope: scope, kind: kind, query: query)
                 } else if let repository {
@@ -178,6 +191,7 @@ final class LibraryStore: ObservableObject {
         case .thoughts: filter.kind = .thought
         case .favorites: filter.favoritesOnly = true
         case .collection(let id): filter.collectionID = id
+        case .trash: break
         }
         if let kind { filter.kind = kind }
         return filter
@@ -192,7 +206,7 @@ final class LibraryStore: ObservableObject {
             case .thoughts: return item.kind == .thought
             case .favorites: return item.favorite
             case .collection(let id): return item.collectionID == id
-            case .history: return false
+            case .history, .trash: return false
             }
         }
         if scope == .recent { candidates = Array(candidates.sorted { $0.createdAt > $1.createdAt }.prefix(50)) }
@@ -204,16 +218,29 @@ final class LibraryStore: ObservableObject {
         try LibrarySearch.search(scopedItems(items, scope: scope, kind: kind), query: query)
     }
 
+    /// Trash rows carry only a preview, so the search matches titles and previews
+    /// instead of the full body the reader never loaded.
+    nonisolated private static func trashResults(_ items: [LibraryItem], query: String, kind: ItemKind?) -> LibrarySearchResults {
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        let matching = items.filter { item in
+            if let kind, item.kind != kind { return false }
+            return terms.allSatisfy { term in
+                item.title.localizedStandardContains(term) || item.preview.localizedStandardContains(term)
+            }
+        }
+        return LibrarySearchResults(query: query, items: matching)
+    }
+
     deinit { searchTask?.cancel() }
 
     var selectedItem: LibraryItem? {
         guard let id = selectedID else { return nil }
-        return snapshot.items.first { $0.id == id }
+        return snapshot.items.first { $0.id == id } ?? snapshot.trashed.first { $0.id == id }
     }
 
     func items(for ids: Set<String>) -> [LibraryItem] {
         guard !ids.isEmpty else { return [] }
-        return snapshot.items.filter { ids.contains($0.id) }
+        return snapshot.items.filter { ids.contains($0.id) } + snapshot.trashed.filter { ids.contains($0.id) }
     }
     var inboxCount: Int { snapshot.items.filter { $0.collectionID == nil }.count }
     var totalBytes: Int64 { snapshot.items.reduce(0) { $0 + $1.byteCount } }
@@ -230,7 +257,23 @@ final class LibraryStore: ObservableObject {
             try await reload()
             ready = true
             status = "所有资料仅保存在这台 Mac"
+            purgeExpiredTrash()
         } catch { errorMessage = error.localizedDescription; status = "资料库打开失败" }
+    }
+
+    /// Trashed items past the retention window are removed on launch, never on a
+    /// user action, so a long-idle library still reclaims disk space.
+    private func purgeExpiredTrash() {
+        guard let repository else { return }
+        Task {
+            do {
+                let report = try await repository.purgeExpiredTrash()
+                guard report.deleted > 0 else { return }
+                try await reload()
+                status = "已清理 \(report.deleted) 项超过 \(LibraryRetention.trashDays) 天的回收站资料"
+                if !report.warnings.isEmpty { errorMessage = report.warnings.joined(separator: "\n\n") }
+            } catch { errorMessage = error.localizedDescription }
+        }
     }
 
     func selectVisibleItem() {
@@ -367,6 +410,10 @@ final class LibraryStore: ObservableObject {
     }
     func edit(_ item: LibraryItem) {
         guard ready, draft == nil, !isImporting else { return }
+        guard !item.isTrashed else {
+            status = "回收站中的资料不能编辑，请先恢复"
+            return
+        }
         if item.textLoaded {
             draft = NoteDraft(itemID: item.id, title: item.title, body: item.text, kind: item.kind)
             return
@@ -474,39 +521,125 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    func requestDelete(_ ids: Set<String>) {
+    /// The delete command moves items to the trash. Only the trash view destroys them.
+    func requestTrash(_ ids: Set<String>) {
         guard ready, !isDeleting, !isBatchUpdating, !ids.isEmpty else { return }
+        pendingDeletionIsPermanent = false
         pendingDeletion = ids
     }
 
-    func requestDeleteSelection() {
-        requestDelete(selection)
+    func requestTrashSelection() {
+        requestTrash(selection)
+    }
+
+    /// Requests the one action that removes managed copies. Used from the trash only.
+    func requestPermanentDelete(_ ids: Set<String>) {
+        guard ready, !isDeleting, !isBatchUpdating, !ids.isEmpty else { return }
+        pendingDeletionIsPermanent = true
+        pendingDeletion = ids
     }
 
     func cancelDelete() {
         pendingDeletion = []
+        pendingDeletionIsPermanent = false
     }
 
     func confirmDelete(_ requested: Set<String>? = nil) async {
         let ids = requested ?? pendingDeletion
-        guard !ids.isEmpty, !isDeleting, !isBatchUpdating, let repository else { return }
+        let permanent = pendingDeletionIsPermanent
         pendingDeletion = []
+        pendingDeletionIsPermanent = false
+        guard !ids.isEmpty, !isDeleting, !isBatchUpdating, let repository else { return }
         isDeleting = true
         defer { isDeleting = false }
         do {
-            let report = try await repository.delete(ids: Array(ids))
-            selection.subtract(ids)
-            try await reload()
-            if report.deleted == 0 {
-                status = "没有可删除的资料"
-            } else if report.warnings.isEmpty {
-                status = "已删除 \(report.deleted) 项资料，原文件保留"
+            if permanent {
+                let report = try await repository.permanentlyDelete(ids: Array(ids))
+                undoableTrash = []
+                selection.subtract(ids)
+                try await reload()
+                if report.deleted == 0 {
+                    status = "没有可删除的资料"
+                } else if report.warnings.isEmpty {
+                    status = "已彻底删除 \(report.deleted) 项，原文件保留"
+                } else {
+                    status = "已彻底删除 \(report.deleted) 项，\(report.warnings.count) 个副本未清理"
+                }
+                if !report.warnings.isEmpty { errorMessage = report.warnings.joined(separator: "\n\n") }
             } else {
-                status = "已删除 \(report.deleted) 项，\(report.warnings.count) 个副本未清理"
+                let count = try await repository.moveToTrash(ids: Array(ids))
+                selection.subtract(ids)
+                try await reload()
+                guard count > 0 else {
+                    status = "没有可移到回收站的资料"
+                    return
+                }
+                undoableTrash = ids
+                status = "已将 \(count) 项移到回收站，\(LibraryRetention.trashDays) 天内可恢复"
             }
         } catch {
             errorMessage = error.localizedDescription
-            status = "删除未完成"
+            status = permanent ? "彻底删除未完成" : "移到回收站未完成"
+        }
+    }
+
+    /// Puts back everything from the most recent trash action.
+    @discardableResult
+    func undoTrash() -> Task<Void, Never>? {
+        restore(undoableTrash, clearsUndo: true)
+    }
+
+    func dismissUndoTrash() {
+        undoableTrash = []
+    }
+
+    /// Emptying the trash destroys copies, so it needs its own confirmation.
+    func requestEmptyTrash() {
+        guard trashedCount > 0, !isDeleting else { return }
+        confirmEmptyTrash = true
+    }
+
+    @discardableResult
+    func restoreFromTrash(_ ids: Set<String>) -> Task<Void, Never>? {
+        restore(ids, clearsUndo: false)
+    }
+
+    private func restore(_ ids: Set<String>, clearsUndo: Bool) -> Task<Void, Never>? {
+        guard ready, !isDeleting, !isBatchUpdating, let repository, !ids.isEmpty else { return nil }
+        isDeleting = true
+        return Task {
+            defer { isDeleting = false }
+            do {
+                let count = try await repository.restoreFromTrash(ids: Array(ids))
+                undoableTrash = clearsUndo ? [] : undoableTrash.subtracting(ids)
+                try await reload()
+                status = count > 0 ? "已恢复 \(count) 项资料" : "没有可恢复的资料"
+            } catch {
+                errorMessage = error.localizedDescription
+                status = "恢复未完成"
+            }
+        }
+    }
+
+    @discardableResult
+    func emptyTrash() -> Task<Void, Never>? {
+        guard ready, !isDeleting, !isBatchUpdating, let repository, trashedCount > 0 else { return nil }
+        isDeleting = true
+        return Task {
+            defer { isDeleting = false }
+            do {
+                let report = try await repository.emptyTrash()
+                undoableTrash = []
+                selection = []
+                try await reload()
+                status = report.warnings.isEmpty
+                    ? "已清空回收站，删除 \(report.deleted) 项"
+                    : "已清空回收站，\(report.warnings.count) 个副本未清理"
+                if !report.warnings.isEmpty { errorMessage = report.warnings.joined(separator: "\n\n") }
+            } catch {
+                errorMessage = error.localizedDescription
+                status = "清空回收站未完成"
+            }
         }
     }
 
