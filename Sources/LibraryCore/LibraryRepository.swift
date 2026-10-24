@@ -586,7 +586,17 @@ public actor LibraryRepository {
             ))
         }
         let matched = try LibrarySearch.search(candidates, query: query)
-        let stripped = matched.items.map { item -> LibraryItem in
+        // A title hit outranks a hit buried in the body; ties fall back to the old
+        // updated_at order, so two runs of the same query agree on the list.
+        let ranked = matched.items
+            .map { (item: $0, relevance: LibrarySearch.relevance(of: $0, query: query)) }
+            .sorted { lhs, rhs in
+                if lhs.relevance != rhs.relevance { return lhs.relevance < rhs.relevance }
+                if lhs.item.updatedAt != rhs.item.updatedAt { return lhs.item.updatedAt > rhs.item.updatedAt }
+                return lhs.item.id < rhs.item.id
+            }
+            .map(\.item)
+        let stripped = ranked.map { item -> LibraryItem in
             var item = item
             item.text = ""
             item.textLoaded = false
