@@ -219,9 +219,11 @@ struct DetailView: View {
                 } else if item.isEditable {
                     Button { store.edit(item) } label: { Label("编辑", systemImage: "square.and.pencil") }
                     Button { store.export(item) } label: { Label("导出为 Markdown…", systemImage: "square.and.arrow.up") }
+                    Button { store.exportPackage(item) } label: { Label("导出资料包…", systemImage: "shippingbox") }
                 } else {
                     Button { store.open(item) } label: { Label("打开文件", systemImage: "arrow.up.forward.app") }
                     Button { store.reveal(item) } label: { Label("在 Finder 中显示", systemImage: "folder") }
+                    Button { store.exportPackage(item) } label: { Label("导出资料包…", systemImage: "shippingbox") }
                 }
             } label: { Label("资料操作", systemImage: "ellipsis") }
             .help("资料操作")

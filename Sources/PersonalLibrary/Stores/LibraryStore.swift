@@ -1090,6 +1090,59 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    /// Writes a `.plib` folder next to whatever the user picks. The package is a
+    /// plain directory, so the panel picks a place, not a file name.
+    func exportPackage(_ item: LibraryItem) {
+        guard ready, let repository else { return }
+        let panel = NSOpenPanel()
+        panel.title = "导出资料包"
+        panel.message = "会生成「\(LibraryPackage.packageName(item.title)).\(LibraryPackage.fileExtension)」文件夹：正文、配图与 metadata.json，不依赖资料库即可打开。"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "导出到此位置"
+        panel.begin { [weak self] response in
+            guard response == .OK, let directory = panel.url else { return }
+            Task { @MainActor in
+                do {
+                    let url = try await repository.exportPackage(id: item.id, to: directory)
+                    self?.status = "已导出资料包「\(url.lastPathComponent)」"
+                } catch { self?.errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    func choosePackage() {
+        guard ready else { return }
+        let panel = NSOpenPanel()
+        panel.title = "导入资料包"
+        panel.message = "选择 .plib 文件夹，或它里面的任意文件。正文、配图、标签与时间会一起还原。"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "导入"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in self?.importPackage(url) }
+        }
+    }
+
+    @discardableResult
+    func importPackage(_ url: URL) -> Task<Void, Never>? {
+        guard ready, let repository else { return nil }
+        let access = url.startAccessingSecurityScopedResource()
+        return Task { [weak self] in
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let item = try await repository.importPackage(from: url)
+                try await self?.reload()
+                self?.selection = [item.id]
+                self?.status = "已导入资料包「\(item.title)」"
+            } catch { self?.errorMessage = error.localizedDescription }
+        }
+    }
+
     func loadBody(_ id: String) async {
         guard let repository else { return }
         if let cached = bodyCache[id] {

@@ -41,6 +41,7 @@ struct ItemListView: View {
                         Button("打开文件") { store.open(item) }
                         Button("在 Finder 中显示") { store.reveal(item) }
                     }
+                    Button("导出资料包…") { store.exportPackage(item) }
                 }
                 Menu("整理到") {
                     Button("待整理") { store.organize(ids, into: nil) }

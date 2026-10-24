@@ -54,6 +54,8 @@ struct PersonalLibraryApp: App {
                     .disabled(!store.ready || store.draft != nil || store.isImporting)
                 Button("导入文件…") { store.chooseFiles() }.keyboardShortcut("o")
                     .disabled(!store.ready || store.isImporting || store.draft != nil)
+                Button("导入资料包…") { store.choosePackage() }.keyboardShortcut("o", modifiers: [.command, .shift])
+                    .disabled(!store.ready || store.isImporting || store.draft != nil)
             }
             CommandGroup(after: .textEditing) {
                 Button("搜索资料") { store.focusSearch.toggle() }.keyboardShortcut("f")
