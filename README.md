@@ -65,14 +65,20 @@ Markdown 中的 `文件路径:行号` 和 `文件路径:行号:列号` 可打开
 
 ## 发布
 
-推送 `v*` 标签会触发 Release 工作流：构建 `.app`、打包 DMG、生成 SHA-256，并创建附带这两个文件的 GitHub Release。
+推送 `v*` 标签会触发 Release 工作流：构建 `.app`、打包 DMG、生成 SHA-256，创建附带这两个文件的 GitHub Release，并在结束前重新下载附件复核校验和。
 
 ```sh
-git tag v0.1.0
+git tag -a v0.1.0 -m "个人资料库 v0.1.0"
 git push origin v0.1.0
 ```
 
-也可以本地打包：
+标签使用 annotated tag，版本号取自标签名去掉前缀 `v`，并写入 `.app` 的 `CFBundleShortVersionString`。如需对已有标签重新构建并覆盖发布，在 Actions 中手动运行 Release 工作流并填入标签名：
+
+```sh
+gh workflow run release.yml -f tag=v0.1.0
+```
+
+也可以本地打包（不发布）：
 
 ```sh
 ./script/package_dmg.sh 0.1.0

@@ -1,0 +1,14 @@
+version: 2
+
+updates:
+  # 让 release/ci 工作流里的 action 版本保持更新，避免再次出现运行时弃用告警。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"

@@ -4,12 +4,19 @@ on:
   push:
     tags:
       - "v*"
+  # 允许对已有标签重新构建并覆盖发布（例如修复打包脚本后补发同一版本）。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要重新构建并发布的已有标签，例如 v0.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -19,11 +26,13 @@ jobs:
     timeout-minutes: 45
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          # generate-notes 需要标签之间的历史才能列出变更。
           fetch-depth: 0
 
       - name: Resolve version
@@ -37,8 +46,13 @@ jobs:
               exit 1
               ;;
           esac
+          if ! commit="$(git rev-parse --verify "$TAG^{commit}" 2>/dev/null)"; then
+            echo "tag not found: $TAG (先 git push origin $TAG)" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Building 个人资料库 v$version"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Building 个人资料库 v$version at $commit"
 
       - name: Show toolchain
         run: |
@@ -56,8 +70,14 @@ jobs:
           PERSONAL_LIBRARY_VERSION: ${{ steps.version.outputs.version }}
         run: ./script/package_dmg.sh --skip-build
 
+      - name: Verify checksums before upload
+        run: |
+          set -euo pipefail
+          ls -l dist
+          ( cd dist && /usr/bin/shasum -a 256 -c ./*.sha256 )
+
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PersonalLibrary-${{ steps.version.outputs.version }}
           path: |
@@ -70,11 +90,12 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
+          commit="${{ steps.version.outputs.commit }}"
           notes="$(mktemp)"
           cat .github/release-header.md > "$notes"
           if ! gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
               -f tag_name="$TAG" \
-              -f target_commitish="$GITHUB_SHA" \
+              -f target_commitish="$commit" \
               --jq .body >> "$notes"; then
             printf '\n**完整变更**：https://github.com/%s/commits/%s\n' \
               "$GITHUB_REPOSITORY" "$TAG" >> "$notes"
@@ -91,6 +112,21 @@ jobs:
               --verify-tag \
               --title "个人资料库 v$version" \
               --notes-file "$notes"
+          fi
+
+      - name: Verify published assets
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          gh release download "$TAG" --dir "$work" --clobber
+          ls -l "$work"
+          ( cd "$work" && /usr/bin/shasum -a 256 -c ./*.sha256 )
+          expected="$(awk '{print $1}' dist/*.sha256)"
+          actual="$(awk '{print $1}' "$work"/*.sha256)"
+          if [[ "$expected" != "$actual" ]]; then
+            echo "published checksum differs from the built DMG" >&2
+            exit 1
           fi
 
       - name: Write job summary
