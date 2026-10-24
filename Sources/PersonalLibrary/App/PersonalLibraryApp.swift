@@ -43,6 +43,9 @@ struct PersonalLibraryApp: App {
                 .background(WindowCloseProtection(store: store))
                 .onAppear { delegate.store = store }
                 .task { await store.load() }
+                .onReceive(NotificationCenter.default.publisher(for: .libraryDidChangeExternally)) { _ in
+                    store.refreshAfterExternalChange()
+                }
         }
         .defaultSize(width: 1440, height: 920)
         .windowToolbarStyle(.unified)
@@ -61,6 +64,11 @@ struct PersonalLibraryApp: App {
                 Button("搜索资料") { store.focusSearch.toggle() }.keyboardShortcut("f")
             }
         }
+        MenuBarExtra("个人资料库", systemImage: "tray.and.arrow.down") {
+            QuickCaptureView(store: store)
+        }
+        .menuBarExtraStyle(.window)
+
         Settings {
             SettingsView(store: store)
         }
