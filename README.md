@@ -141,6 +141,7 @@ Markdown 配图后台解码，展示缩略图最长边 2,048 像素；每个配�
 - `Tests/`：LibraryCore 与 App 层自动化测试。
 - `script/build_and_run.sh`：构建、打包、启动入口；可选外置存储路由。
 - `script/package_dmg.sh`：生成 DMG 与 SHA-256 校验文件。
+- `script/search-benchmark.py`：合成 1 万份资料测两字中文查询的耗时，可复现搜索性能。
 - `.github/workflows/ci.yml`：push 与 PR 的构建、测试工作流。
 - `.github/workflows/release.yml`：`v*` 标签构建 DMG 并发布 Release。
 - `docs/third-party-notices.md`：第三方依赖与素材许可。

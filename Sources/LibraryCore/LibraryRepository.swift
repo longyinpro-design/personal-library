@@ -1,14 +1,22 @@
 import CryptoKit
 import Foundation
+import os
 
 public actor LibraryRepository {
     public nonisolated let root: URL
     private let database: Database
     private let files: URL
+    private let scanMinimumBytes: Int64
     private var images: MarkdownAttachments { MarkdownAttachments(root: root) }
 
     public init(root: URL) throws {
+        try self.init(root: root, scanMinimumBytes: Self.defaultScanMinimumBytes)
+    }
+
+    /// `scanMinimumBytes` lets tests exercise the split scan on a small library.
+    init(root: URL, scanMinimumBytes: Int64) throws {
         self.root = root
+        self.scanMinimumBytes = scanMinimumBytes
         self.files = root.appendingPathComponent("Files", isDirectory: true)
         try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("Attachments", isDirectory: true), withIntermediateDirectories: true)
@@ -570,7 +578,23 @@ public actor LibraryRepository {
         } else {
             sql = "SELECT * FROM (\(source) AND \(searchClause)) ORDER BY updated_at DESC, id"
         }
-        let rows = try database.rows(sql, scopeValues + searchValues)
+        let started = Date()
+        var width = 1
+        let rows: [[String: String]]
+        // Short terms cannot use the trigram index, so they scan every body. That
+        // scan is split across read-only connections once the library is big
+        // enough to make the split worth it (see script/search-benchmark.py).
+        if filter.recentLimit == nil,
+           (terms.contains { $0.count < 3 } || !database.supportsFTS),
+           terms.count <= Self.scanTermLimit,
+           let slices = try scanSlices() {
+            rows = try Self.scan(root: root, scope: scopeClause, search: searchClause,
+                                 scopeValues: scopeValues, searchValues: searchValues, slices: slices)
+            width = slices.count
+        } else {
+            rows = try database.rows(sql, scopeValues + searchValues)
+        }
+        Self.logSlowSearch(started, terms: terms.count, width: width)
         var candidates: [LibraryItem] = []
         candidates.reserveCapacity(rows.count)
         for row in rows {
@@ -609,6 +633,68 @@ public actor LibraryRepository {
 
     public func body(for id: String) throws -> String? {
         try database.rows("SELECT body FROM items WHERE id = ?", [id]).first?["body"]
+    }
+
+    /// A bounded rowid range of one parallel scan.
+    private struct ScanSlice: Sendable {
+        let low: Int64
+        let high: Int64
+    }
+
+    /// Above this size a short-query scan is worth splitting across cores.
+    static let defaultScanMinimumBytes: Int64 = 32 * 1024 * 1024
+    private static let scanWidth = 4
+    /// Every term is ANDed into one scan, so this only guards against pathological
+    /// queries; it is not a per-term cost.
+    private static let scanTermLimit = 6
+    private static let searchLog = Logger(subsystem: "com.longyinpro.personal-library", category: "search")
+
+    private func scanSlices() throws -> [ScanSlice]? {
+        guard try database.byteSize() >= scanMinimumBytes else { return nil }
+        let bounds = try database.rows("SELECT min(rowid) AS low, max(rowid) AS high FROM items").first
+        guard let low = Int64(bounds?["low"] ?? ""), let high = Int64(bounds?["high"] ?? ""), high >= low else { return nil }
+        let step = (high - low) / Int64(Self.scanWidth) + 1
+        return (0..<Self.scanWidth).map { index in
+            let start = low + Int64(index) * step
+            return ScanSlice(low: start, high: min(high, start + step - 1))
+        }
+    }
+
+    /// Runs the same WHERE clause over disjoint rowid ranges on separate read-only
+    /// connections, then restores the single-query ordering.
+    private nonisolated static func scan(root: URL, scope: String, search: String,
+                                         scopeValues: [String?], searchValues: [String?],
+                                         slices: [ScanSlice]) throws -> [[String: String]] {
+        let sql = "SELECT rowid AS rowid, * FROM items WHERE \(scope) AND \(search) AND rowid BETWEEN ? AND ?"
+        let lock = NSLock()
+        var pieces = [[[String: String]]](repeating: [], count: slices.count)
+        var failure: Error?
+        DispatchQueue.concurrentPerform(iterations: slices.count) { index in
+            do {
+                let connection = try Database(readOnly: root.appendingPathComponent("library.sqlite"))
+                let rows = try connection.rows(sql, scopeValues + searchValues + [String(slices[index].low), String(slices[index].high)])
+                lock.lock(); pieces[index] = rows; lock.unlock()
+            } catch {
+                lock.lock(); if failure == nil { failure = error }; lock.unlock()
+            }
+        }
+        if let failure { throw failure }
+        var rows = pieces.flatMap { $0 }
+        rows.sort { left, right in
+            let a = Double(left["updated_at"] ?? "") ?? 0
+            let b = Double(right["updated_at"] ?? "") ?? 0
+            if a != b { return a > b }
+            return (left["id"] ?? "") < (right["id"] ?? "")
+        }
+        return rows
+    }
+
+    /// A short query that takes long is worth knowing about; terms stay out of the
+    /// log because they are user content.
+    private static func logSlowSearch(_ started: Date, terms: Int, width: Int) {
+        let milliseconds = Date().timeIntervalSince(started) * 1000
+        guard milliseconds >= 150 else { return }
+        searchLog.notice("短词扫描 \(terms, privacy: .public) 个词用时 \(Int(milliseconds), privacy: .public) ms，\(width, privacy: .public) 路")
     }
 
     private static func trigrams(_ term: String) -> [String] {
