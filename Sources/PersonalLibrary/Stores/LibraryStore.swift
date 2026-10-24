@@ -105,6 +105,9 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var isCheckingInbox = false
     @Published private(set) var inboxError: String?
     private let inboxWatcher = InboxWatcher()
+    /// Deterministic import rules, kept in the library so two libraries can
+    /// file things differently.
+    @Published private(set) var rules: [LibraryRule] = []
     private var inboxState = InboxState()
     /// Mirrors the library into Spotlight. Off means the index is emptied.
     @Published var spotlightEnabled = LibraryStore.spotlightDefault {
@@ -315,6 +318,7 @@ final class LibraryStore: ObservableObject {
             refreshBackups()
             status = restored ? "已从备份恢复，原资料库保留为 \(LibraryBackupStore.safetyCopyName)" : "所有资料仅保存在这台 Mac"
             syncSpotlight()
+            rules = LibraryRuleStore.load(from: root)
             restoreInbox()
             await backupIfDue()
             purgeExpiredTrash()
@@ -673,6 +677,34 @@ final class LibraryStore: ObservableObject {
         status = "已取消导入"
     }
 
+    // MARK: 规则
+
+    /// Saves the edited rules. Blank match words and rules that do nothing are
+    /// dropped, so a stray empty row cannot swallow every import.
+    func saveRules(_ edited: [LibraryRule]) {
+        let cleaned = edited
+            .map { rule -> LibraryRule in
+                var rule = rule
+                rule.match = rule.match.trimmingCharacters(in: .whitespacesAndNewlines)
+                rule.collection = rule.collection?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if rule.collection?.isEmpty == true { rule.collection = nil }
+                rule.tags = rule.tags.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                return rule
+            }
+            .filter { $0.isUseful }
+        rules = cleaned
+        LibraryRuleStore.save(cleaned, in: root)
+        status = cleaned.isEmpty ? "已清空导入规则" : "已保存 \(cleaned.count) 条导入规则"
+    }
+
+    var ruleSummary: String {
+        switch rules.count {
+        case 0: return "未设置规则"
+        case 1: return "1 条规则：\(rules[0].match)"
+        default: return "\(rules.count) 条规则，按顺序匹配"
+        }
+    }
+
     // MARK: 收件箱
 
     func chooseInboxFolder() {
@@ -755,7 +787,7 @@ final class LibraryStore: ObservableObject {
                     if preview.pending.isEmpty {
                         if preview.failures.isEmpty { skipped += 1 } else { failures += preview.failures.map { "\(name)：\($0)" } }
                     } else {
-                        let report = try await repository.importFiles(preview, skippingDuplicates: true)
+                        let report = try await repository.importFiles(preview, skippingDuplicates: true, rules: rules)
                         imported += report.importedIDs.count
                         skipped += report.skipped.count
                         failures += report.failures.map { "\(name)：\($0)" }
@@ -810,13 +842,14 @@ final class LibraryStore: ObservableObject {
 
     private func finishImport(_ preview: LibraryRepository.ImportPreview, skippingDuplicates: Bool) async throws {
         guard let repository else { return }
-        let report = try await repository.importFiles(preview, skippingDuplicates: skippingDuplicates)
+        let report = try await repository.importFiles(preview, skippingDuplicates: skippingDuplicates, rules: rules)
         try await reload()
         // Import publishes new data; current navigation and selection still belong to the reader.
         var parts: [String] = []
         if !report.importedIDs.isEmpty { parts.append("已导入 \(report.importedIDs.count) 项") }
         if !report.skipped.isEmpty { parts.append("跳过 \(report.skipped.count) 个重复文件") }
         if !report.failures.isEmpty { parts.append("\(report.failures.count) 项未成功") }
+        if !report.ruled.isEmpty { parts.append("按规则整理了 \(report.ruled.count) 项") }
         status = parts.isEmpty ? "没有导入内容" : parts.joined(separator: "，")
         if !report.warnings.isEmpty { status += "；部分配图未保存" }
         let messages = report.failures + report.warnings.map { "配图提示：" + $0 }
