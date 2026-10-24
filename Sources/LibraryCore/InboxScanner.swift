@@ -82,12 +82,12 @@ public struct InboxState: Codable, Sendable, Equatable {
         try? data.write(to: url, options: .atomic)
     }
 
-    /// Remembers one file, dropping the oldest entries once the list grows.
+    /// Remembers one file so the next scan skips it. Past the cap entries are
+    /// dropped arbitrarily: the worst case is retrying an old file, whose bytes
+    /// are then skipped by the fingerprint check anyway.
     public mutating func mark(_ name: String, signature: String) {
         processed[name] = signature
         guard processed.count > InboxScanner.rememberedFiles else { return }
-        // Dictionary order is not insertion order; keep a bounded set instead by
-        // dropping names that no longer exist once the cap is hit.
         let excess = processed.count - InboxScanner.rememberedFiles
         for key in processed.keys.prefix(excess) { processed[key] = nil }
     }
