@@ -64,7 +64,21 @@ Markdown 中的 `文件路径:行号` 和 `文件路径:行号:列号` 可打开
 
 在部分 Command Line Tools 组合下，脚本会加载已安装 Xcode 的 SwiftUI 宏插件；若插件不存在会明确失败。
 
-本地脚本产出的是 ad-hoc 签名的开发构建，不会安装到 Applications。嵌套沙箱环境（如部分 CI 或 agent 容器）若禁止 SwiftPM 自身的沙箱，可用 `PERSONAL_LIBRARY_SWIFTPM_SANDBOX=0` 关闭它。
+本地脚本产出的是 ad-hoc 签名的开发构建，不会安装到 Applications。打包脚本会在找到 Developer ID 证书时改用正式签名（含 hardened runtime），并在提供公证凭据时把 DMG 提交 Apple 公证、staple 后校验 `spctl`；两者都没有就保持 ad-hoc，安装说明也会相应改写。见下方「签名与公证」。嵌套沙箱环境（如部分 CI 或 agent 容器）若禁止 SwiftPM 自身的沙箱，可用 `PERSONAL_LIBRARY_SWIFTPM_SANDBOX=0` 关闭它。
+
+## 签名与公证
+
+`script/package_dmg.sh` 按环境变量决定签名强度，都不设置时与之前一致（ad-hoc，右键打开）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `PERSONAL_LIBRARY_SIGN_IDENTITY` | `Developer ID Application: 名字 (TEAMID)`；留空时自动取钥匙串里第一个 Developer ID 证书 |
+| `PERSONAL_LIBRARY_NOTARY_PROFILE` | `xcrun notarytool store-credentials` 存下的钥匙串 profile |
+| `PERSONAL_LIBRARY_NOTARY_APPLE_ID` + `_TEAM_ID` + `_PASSWORD` | 不使用 profile 时改用 Apple ID + App 专用密码 |
+
+有证书就重新签名（`--options runtime --timestamp`）；有证书且有任一凭据才会 `notarytool submit --wait` → `stapler staple` → `spctl -a -t install`。缺少凭据时脚本会明确提示「已签名但未公证」，不会静默产出半成品。
+
+Release 工作流把 `MACOS_CERTIFICATE_P12`（base64 的 .p12）、`MACOS_CERTIFICATE_PASSWORD`、`NOTARY_APPLE_ID`、`NOTARY_TEAM_ID`、`NOTARY_PASSWORD` 作为可选 secrets 注入；未配置时自动走 ad-hoc，CI 依旧能产出可下载的 DMG。
 
 ## 发布
 
