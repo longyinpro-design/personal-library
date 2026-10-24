@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @ObservedObject var store: LibraryStore
     @State private var selectingBackup = false
+    @State private var showingRules = false
 
     var body: some View {
         Form {
@@ -42,6 +43,15 @@ struct SettingsView: View {
                     }.padding(.vertical, 4)
                 }
                 Text("备份由 SQLite 自身写出（VACUUM INTO），包含笔记、正文、标签与索引。导入到 Files/ 的文件副本不在备份内，原文件仍在原位置。恢复只替换数据库，不会删除这些副本。")
+            }
+            Section("导入规则") {
+                LabeledContent("规则") { Text(store.ruleSummary) }
+                HStack(spacing: 10) {
+                    Button("管理规则…") { showingRules = true }
+                        .disabled(!store.ready)
+                    Text("文件名命中匹配词时，导入后自动归入目录并打标签。收件箱自动导入走同一套规则。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
             }
             Section("收件箱") {
                 LabeledContent("文件夹") {
@@ -101,7 +111,8 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .font(.system(size: 12))
-        .frame(width: 570, height: 620)
+        .frame(width: 570, height: 660)
+        .sheet(isPresented: $showingRules) { RuleEditorView(store: store) }
         .fileImporter(isPresented: $selectingBackup, allowedContentTypes: [.database, .data], allowsMultipleSelection: false) { result in
             guard case let .success(urls) = result, let url = urls.first else {
                 if case let .failure(error) = result { store.errorMessage = error.localizedDescription }

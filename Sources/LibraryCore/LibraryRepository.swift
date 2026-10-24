@@ -118,7 +118,8 @@ public actor LibraryRepository {
 
     /// Copies the files that passed the preview. Duplicates are skipped or copied
     /// again depending on what the user picked in the prompt.
-    public func importFiles(_ preview: ImportPreview, skippingDuplicates: Bool) throws -> ImportReport {
+    public func importFiles(_ preview: ImportPreview, skippingDuplicates: Bool,
+                            rules: [LibraryRule] = []) throws -> ImportReport {
         var report = ImportReport()
         report.failures += preview.failures
         for entry in preview.pending {
@@ -152,6 +153,15 @@ public actor LibraryRepository {
                     try record("导入了「\(source.lastPathComponent)」")
                 }
                 report.importedIDs.append(id)
+                if let rule = LibraryRules.match(for: source.lastPathComponent, in: rules), rule.isUseful {
+                    do {
+                        try apply(rule, to: id)
+                        report.ruled.append(source.lastPathComponent)
+                        try record("按规则「\(rule.match)」整理了「\(source.lastPathComponent)」")
+                    } catch {
+                        report.warnings.append("\(source.lastPathComponent)：规则未完全应用（\(error.localizedDescription)）")
+                    }
+                }
                 report.warnings += prepared.report.failures.map { "\(source.lastPathComponent)：\($0)" }
             } catch {
                 var message = "\(source.lastPathComponent)：\(error.localizedDescription)"
@@ -167,6 +177,34 @@ public actor LibraryRepository {
 
     public func importFiles(_ urls: [URL]) throws -> ImportReport {
         try importFiles(previewImport(urls), skippingDuplicates: false)
+    }
+
+    /// Files a new item into the rule's collection and gives it the rule's tags.
+    /// The updates are written directly so one import leaves one activity line
+    /// instead of three.
+    private func apply(_ rule: LibraryRule, to id: String) throws {
+        if let name = rule.collection?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            let collectionID = try collectionID(named: name)
+            try database.execute("UPDATE items SET collection_id = ? WHERE id = ?", [collectionID, id])
+        }
+        let tags = Self.clean(rule.tags)
+        guard !tags.isEmpty else { return }
+        try database.transaction {
+            for name in tags {
+                guard let tagID = try tagID(named: name, creating: true) else { continue }
+                try database.execute("INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)", [id, tagID])
+            }
+        }
+    }
+
+    /// Reuses a collection with the same name, whatever its case, so two rules
+    /// pointing at「合同」do not end up with two collections.
+    private func collectionID(named name: String) throws -> String {
+        if let existing = try database.rows("SELECT id FROM collections WHERE name = ? COLLATE NOCASE", [name]).first,
+           let id = existing["id"] {
+            return id
+        }
+        return try createCollection(name: name)
     }
 
     // MARK: - Library packages

@@ -111,6 +111,8 @@ public struct ImportReport: Sendable {
     public var skipped: [String] = []
     public var failures: [String] = []
     public var warnings: [String] = []
+    /// File names that an import rule also filed or tagged.
+    public var ruled: [String] = []
 }
 
 public struct LibraryDeletionReport: Sendable {
