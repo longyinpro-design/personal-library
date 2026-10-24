@@ -86,6 +86,7 @@ public struct LibrarySnapshot: Sendable {
 
 public struct ImportReport: Sendable {
     public var importedIDs: [String] = []
+    public var skipped: [String] = []
     public var failures: [String] = []
     public var warnings: [String] = []
 }

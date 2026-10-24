@@ -15,6 +15,20 @@ struct ContentView: View {
         }
     }
 
+    private var duplicateImportTitle: String {
+        let count = store.pendingImport?.duplicates.count ?? 0
+        return count == 1 ? "这个文件已在库中" : "\(count) 个文件已在库中"
+    }
+
+    private var duplicateImportMessage: String {
+        guard let preview = store.pendingImport else { return "" }
+        let lines = preview.duplicates.map { entry -> String in
+            if entry.repeatedInBatch { return "\(entry.name)（本次选择里重复）" }
+            return "\(entry.name)（已有 \(entry.existing.count) 个副本）"
+        }
+        return lines.joined(separator: "\n") + "\n\n按内容比对，同名但内容不同的文件不算重复。"
+    }
+
     private var library: some View {
         NavigationSplitView {
             SidebarView(store: store)
@@ -69,6 +83,14 @@ struct ContentView: View {
         .alert("操作未完成", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("好", role: .cancel) { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
+        .alert(duplicateImportTitle, isPresented: Binding(get: { store.pendingImport != nil },
+                                                          set: { if !$0 { store.cancelPendingImport() } })) {
+            Button("仍然导入") { store.resolvePendingImport(keepDuplicates: true) }
+            Button("跳过这些文件") { store.resolvePendingImport(keepDuplicates: false) }
+            Button("取消", role: .cancel) { store.cancelPendingImport() }
+        } message: {
+            Text(duplicateImportMessage)
+        }
         .confirmationDialog(store.pendingDeletionIsPermanent ? "彻底删除所选资料？" : "删除所选资料？",
                             isPresented: Binding(get: { !store.pendingDeletion.isEmpty },
                                                  set: { if !$0 { store.cancelDelete() } }),

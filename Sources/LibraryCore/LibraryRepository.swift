@@ -49,9 +49,65 @@ public actor LibraryRepository {
         return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"], text: "", extractionNote: row["extraction_note"], byteCount: size, createdAt: Date(timeIntervalSince1970: created), updatedAt: Date(timeIntervalSince1970: updated), collectionID: row["collection_id"], favorite: row["favorite"] == "1", imageBasePath: row["image_base_path"], imageAttachments: attached, imageAttachmentIssues: issues, sourcePaths: (sourceRows[id] ?? []).compactMap { $0["path"] }, preview: row["preview"] ?? "", textLoaded: false, deletedAt: row["deleted_at"].flatMap(Double.init).map { Date(timeIntervalSince1970: $0) })
     }
 
-    public func importFiles(_ urls: [URL]) throws -> ImportReport {
-        var report = ImportReport()
+    /// One file the user asked to import, with the digest that was read off disk
+    /// while the import sheet was open.
+    public struct PendingImport: Sendable, Identifiable {
+        public let id: String
+        public let url: URL
+        public let fingerprint: String
+        /// Copies already in the library with the same bytes.
+        public let existing: [LibraryItem]
+        /// The same file was picked twice in one import.
+        public let repeatedInBatch: Bool
+
+        public var name: String { url.lastPathComponent }
+        public var isDuplicate: Bool { !existing.isEmpty || repeatedInBatch }
+    }
+
+    public struct ImportPreview: Sendable {
+        public var pending: [PendingImport] = []
+        public var failures: [String] = []
+        public var duplicates: [PendingImport] { pending.filter(\.isDuplicate) }
+        public var hasDuplicates: Bool { !duplicates.isEmpty }
+        public var existingCopyCount: Int { duplicates.reduce(0) { $0 + $1.existing.count } }
+    }
+
+    /// Hashes every file and looks for copies already in the library, so the app
+    /// can ask before copying anything.
+    public func previewImport(_ urls: [URL]) throws -> ImportPreview {
+        var preview = ImportPreview()
+        var seen: [String: Int] = [:]
         for source in urls {
+            let access = source.startAccessingSecurityScopedResource()
+            defer { if access { source.stopAccessingSecurityScopedResource() } }
+            do {
+                let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                guard values.isRegularFile == true else { throw LibraryError.message("请选择普通文件，文件夹请先选择其中的文件") }
+                guard (values.fileSize ?? 0) <= 200_000_000 else { throw LibraryError.message("第一版支持单文件不超过 200 MB") }
+                let fingerprint = try FileFingerprint.sha256(of: source)
+                let copies = seen[fingerprint, default: 0]
+                seen[fingerprint] = copies + 1
+                let existing = try items(matchingFingerprint: fingerprint)
+                preview.pending.append(PendingImport(id: UUID().uuidString, url: source, fingerprint: fingerprint,
+                                                     existing: existing, repeatedInBatch: copies > 0))
+            } catch {
+                preview.failures.append("\(source.lastPathComponent)：\(error.localizedDescription)")
+            }
+        }
+        return preview
+    }
+
+    /// Copies the files that passed the preview. Duplicates are skipped or copied
+    /// again depending on what the user picked in the prompt.
+    public func importFiles(_ preview: ImportPreview, skippingDuplicates: Bool) throws -> ImportReport {
+        var report = ImportReport()
+        report.failures += preview.failures
+        for entry in preview.pending {
+            let source = entry.url
+            if skippingDuplicates, entry.isDuplicate {
+                report.skipped.append(source.lastPathComponent)
+                continue
+            }
             let access = source.startAccessingSecurityScopedResource()
             defer { if access { source.stopAccessingSecurityScopedResource() } }
             let id = UUID().uuidString
@@ -72,7 +128,7 @@ public actor LibraryRepository {
                     catch { report.warnings.append("\(source.lastPathComponent)：\(error.localizedDescription)") }
                 }
                 try publishImages(prepared, id: id) {
-                    try database.execute("INSERT INTO items (id,title,kind,relative_path,body,extraction_note,byte_count,created_at,updated_at,image_base_path) VALUES (?,?,?,?,?,?,?,?,?,?)", [id, source.lastPathComponent, extraction.kind.rawValue, relativePath, extraction.text, extraction.note, String(values.fileSize ?? 0), now, now, imageBase])
+                    try database.execute("INSERT INTO items (id,title,kind,relative_path,body,extraction_note,byte_count,created_at,updated_at,image_base_path,fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?)", [id, source.lastPathComponent, extraction.kind.rawValue, relativePath, extraction.text, extraction.note, String(values.fileSize ?? 0), now, now, imageBase, entry.fingerprint])
                     try database.execute("INSERT INTO item_sources (item_id,path) VALUES (?,?)", [id, source.standardizedFileURL.path])
                     try record("导入了「\(source.lastPathComponent)」")
                 }
@@ -90,7 +146,39 @@ public actor LibraryRepository {
         return report
     }
 
+    public func importFiles(_ urls: [URL]) throws -> ImportReport {
+        try importFiles(previewImport(urls), skippingDuplicates: false)
+    }
+
+    /// Gives items imported before fingerprints existed one, so they take part in
+    /// duplicate detection too. Runs a bounded batch so launch is never held up.
     @discardableResult
+    public func backfillFingerprints(limit: Int = 40) throws -> Int {
+        let rows = try database.rows("SELECT id, relative_path FROM items WHERE fingerprint IS NULL AND relative_path IS NOT NULL AND deleted_at IS NULL LIMIT ?", [String(limit)])
+        var updated = 0
+        for row in rows {
+            guard let id = row["id"], let relativePath = row["relative_path"] else { continue }
+            let copy = files.appendingPathComponent(relativePath)
+            guard FileManager.default.fileExists(atPath: copy.path),
+                  let fingerprint = try? FileFingerprint.sha256(of: copy) else { continue }
+            try database.execute("UPDATE items SET fingerprint = ? WHERE id = ?", [fingerprint, id])
+            updated += 1
+        }
+        return updated
+    }
+
+    private func items(matchingFingerprint fingerprint: String) throws -> [LibraryItem] {
+        let rows = try database.rows("SELECT id, title, kind, relative_path, byte_count, created_at, updated_at FROM items WHERE fingerprint = ? AND deleted_at IS NULL ORDER BY created_at, id", [fingerprint])
+        return rows.compactMap { row in
+            guard let id = row["id"], let title = row["title"], let kind = ItemKind(rawValue: row["kind"] ?? "") else { return nil }
+            return LibraryItem(id: id, title: title, kind: kind, relativePath: row["relative_path"],
+                               text: "", extractionNote: nil, byteCount: Int64(row["byte_count"] ?? "") ?? 0,
+                               createdAt: Date(timeIntervalSince1970: Double(row["created_at"] ?? "") ?? 0),
+                               updatedAt: Date(timeIntervalSince1970: Double(row["updated_at"] ?? "") ?? 0),
+                               collectionID: nil, favorite: false)
+        }
+    }
+
     public func saveNote(id: String? = nil, title: String, body: String, kind: ItemKind, collectionID: String? = nil) throws -> String {
         guard kind == .note || kind == .thought else { throw LibraryError.message("只有笔记和随笔可以编辑") }
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
