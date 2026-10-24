@@ -169,6 +169,187 @@ public actor LibraryRepository {
         try importFiles(previewImport(urls), skippingDuplicates: false)
     }
 
+    // MARK: - Library packages
+
+    /// Writes one item as a `.plib` folder inside `directory`. Everything is built
+    /// in a temporary folder first, so a failure never leaves half a package.
+    public func exportPackage(id: String, to directory: URL) throws -> URL {
+        guard let row = try database.rows("SELECT * FROM items WHERE id = ?", [id]).first,
+              let title = row["title"], let kind = row["kind"] else {
+            throw LibraryPackageError.missingItem
+        }
+        let destination = directory
+            .appendingPathComponent(LibraryPackage.packageName(title))
+            .appendingPathExtension(LibraryPackage.fileExtension)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw LibraryPackageError.destinationExists(destination.lastPathComponent)
+        }
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("plib-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        do {
+            let contentName = try writePackageContent(row: row, into: staging)
+            var attachments: [LibraryPackage.Metadata.Attachment] = []
+            let imageRows = try database.rows("""
+                SELECT reference, relative_path FROM markdown_images
+                WHERE item_id = ? AND relative_path IS NOT NULL ORDER BY reference
+                """, [id])
+            if !imageRows.isEmpty {
+                let folder = staging.appendingPathComponent(LibraryPackage.attachmentsFolder, isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                for image in imageRows {
+                    guard let reference = image["reference"], let relative = image["relative_path"] else { continue }
+                    let source = try images.managedURL(relative)
+                    guard FileManager.default.fileExists(atPath: source.path) else { continue }
+                    try FileManager.default.copyItem(at: source, to: folder.appendingPathComponent(source.lastPathComponent))
+                    attachments.append(.init(reference: reference,
+                                             file: LibraryPackage.attachmentsFolder + "/" + source.lastPathComponent))
+                }
+            }
+            let tags = try database.rows("""
+                SELECT tags.name AS name FROM item_tags JOIN tags ON tags.id = item_tags.tag_id
+                WHERE item_tags.item_id = ? ORDER BY tags.name COLLATE NOCASE
+                """, [id]).compactMap { $0["name"] }
+            let metadata = LibraryPackage.Metadata(
+                id: id, title: title, kind: kind,
+                createdAt: Date(timeIntervalSince1970: Double(row["created_at"] ?? "") ?? 0),
+                updatedAt: Date(timeIntervalSince1970: Double(row["updated_at"] ?? "") ?? 0),
+                tags: tags,
+                originalPath: try database.rows("SELECT path FROM item_sources WHERE item_id = ? ORDER BY path LIMIT 1", [id]).first?["path"],
+                contentName: contentName,
+                attachments: attachments)
+            let data = try LibraryPackage.encoder().encode(metadata)
+            try data.write(to: staging.appendingPathComponent(LibraryPackage.metadataName), options: .atomic)
+            try FileManager.default.moveItem(at: staging, to: destination)
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: staging)
+            throw error
+        }
+    }
+
+    /// Markdown goes out as `content.md`; anything else leaves as a copy of the
+    /// original bytes, which keeps PDFs and images usable outside the app.
+    private func writePackageContent(row: [String: String], into directory: URL) throws -> String {
+        let relative = row["relative_path"]
+        let suffix = relative.map { ($0 as NSString).pathExtension.lowercased() } ?? ""
+        if relative == nil || ["md", "markdown"].contains(suffix) {
+            let body = row["body"] ?? ""
+            try body.write(to: directory.appendingPathComponent(LibraryPackage.markdownName), atomically: true, encoding: .utf8)
+            return LibraryPackage.markdownName
+        }
+        guard let relative else { throw LibraryPackageError.missingFile(row["title"] ?? "") }
+        let source = files.appendingPathComponent(relative)
+        guard FileManager.default.fileExists(atPath: source.path) else { throw LibraryPackageError.missingFile(relative) }
+        let name = suffix.isEmpty ? "content" : "content." + suffix
+        try FileManager.default.copyItem(at: source, to: directory.appendingPathComponent(name))
+        return name
+    }
+
+    /// Reads a `.plib` back into the library without the source machine. The
+    /// package id is not reused: a second import is a second item, like any file.
+    public func importPackage(from url: URL) throws -> LibraryItem {
+        let packageURL = LibraryPackage.packageDirectory(for: url)
+        let metadataURL = packageURL.appendingPathComponent(LibraryPackage.metadataName)
+        guard let data = try? Data(contentsOf: metadataURL) else { throw LibraryPackageError.notAPackage }
+        let metadata: LibraryPackage.Metadata
+        do { metadata = try LibraryPackage.decoder().decode(LibraryPackage.Metadata.self, from: data) }
+        catch { throw LibraryPackageError.notAPackage }
+        guard metadata.version <= LibraryPackage.version else {
+            throw LibraryPackageError.unsupportedVersion(metadata.version)
+        }
+        let contentURL = try packageFile(metadata.contentName, in: packageURL)
+        guard FileManager.default.fileExists(atPath: contentURL.path) else {
+            throw LibraryPackageError.missingFile(metadata.contentName)
+        }
+        let id = UUID().uuidString
+        var created: [URL] = []
+        do {
+            var body = ""
+            var relativePath: String?
+            var note: String?
+            var kind = ItemKind(rawValue: metadata.kind) ?? .note
+            if metadata.contentName.lowercased().hasSuffix(".md") {
+                body = try String(contentsOf: contentURL, encoding: .utf8)
+            } else {
+                let ext = contentURL.pathExtension.filter { $0.isLetter || $0.isNumber }.prefix(16)
+                let relative = id + (ext.isEmpty ? "" : "." + ext)
+                let destination = files.appendingPathComponent(relative)
+                try FileManager.default.copyItem(at: contentURL, to: destination)
+                created.append(destination)
+                let extraction = TextExtractor.extract(destination, temporaryDirectory: root)
+                body = extraction.text
+                note = extraction.note
+                kind = extraction.kind
+                relativePath = relative
+            }
+            var attachments: [(reference: String, path: String)] = []
+            for attachment in metadata.attachments {
+                let source = try packageFile(attachment.file, in: packageURL)
+                guard FileManager.default.fileExists(atPath: source.path) else { continue }
+                let path = "Attachments/" + source.lastPathComponent
+                let destination = try images.managedURL(path)
+                if !FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try FileManager.default.copyItem(at: source, to: destination)
+                    created.append(destination)
+                }
+                attachments.append((attachment.reference, path))
+            }
+            let fingerprint = try FileFingerprint.sha256(of: contentURL)
+            let bytes = (try? contentURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            let createdStamp = String(metadata.createdAt.timeIntervalSince1970)
+            let updatedStamp = String(metadata.updatedAt.timeIntervalSince1970)
+            try database.transaction {
+                try database.execute("""
+                    INSERT INTO items (id,title,kind,relative_path,body,extraction_note,byte_count,created_at,updated_at,image_base_path,fingerprint,ocr_version)
+                    VALUES (?,?,?,?,?,?,?,?,?,NULL,?,'0')
+                    """, [id, metadata.title, kind.rawValue, relativePath, body, note,
+                          String(bytes), createdStamp, updatedStamp, fingerprint])
+                for attachment in attachments {
+                    try database.execute("INSERT INTO markdown_images (item_id,reference,relative_path,failure) VALUES (?,?,?,NULL)",
+                                         [id, attachment.reference, attachment.path])
+                }
+                for name in metadata.tags {
+                    guard let tag = try tagID(named: name, creating: true) else { continue }
+                    try database.execute("INSERT OR IGNORE INTO item_tags (item_id,tag_id) VALUES (?,?)", [id, tag])
+                }
+                if let path = metadata.originalPath {
+                    try database.execute("INSERT INTO item_sources (item_id,path) VALUES (?,?)", [id, path])
+                }
+                try record("从资料包导入了「\(metadata.title)」")
+            }
+            return try loadItem(id)
+        } catch {
+            for file in created { try? FileManager.default.removeItem(at: file) }
+            throw error
+        }
+    }
+
+    /// Resolves a name inside the package and refuses anything that climbs out.
+    private func packageFile(_ name: String, in packageURL: URL) throws -> URL {
+        guard !name.isEmpty, !name.hasPrefix("/"), !name.contains("\0") else {
+            throw LibraryPackageError.pathEscapesPackage(name)
+        }
+        let url = packageURL.appendingPathComponent(name).standardizedFileURL
+        let root = packageURL.standardizedFileURL.path
+        guard url.path.hasPrefix(root + "/") else { throw LibraryPackageError.pathEscapesPackage(name) }
+        return url
+    }
+
+    private func loadItem(_ id: String) throws -> LibraryItem {
+        let imageRows = Dictionary(grouping: try database.rows("SELECT * FROM markdown_images WHERE item_id = ? ORDER BY reference", [id]), by: { $0["item_id"]! })
+        let sourceRows = Dictionary(grouping: try database.rows("SELECT * FROM item_sources WHERE item_id = ? ORDER BY path", [id]), by: { $0["item_id"]! })
+        let tagRows = Dictionary(grouping: try database.rows("""
+            SELECT item_tags.item_id AS item_id, tags.name AS name FROM item_tags
+            JOIN tags ON tags.id = item_tags.tag_id WHERE item_tags.item_id = ?
+            """, [id]), by: { $0["item_id"]! })
+        guard let row = try database.rows("SELECT * FROM items WHERE id = ?", [id]).first else {
+            throw LibraryPackageError.missingItem
+        }
+        return try item(from: row, imageRows: imageRows, sourceRows: sourceRows, tagRows: tagRows)
+    }
+
     /// Gives items imported before fingerprints existed one, so they take part in
     /// duplicate detection too. Runs a bounded batch so launch is never held up.
     @discardableResult
