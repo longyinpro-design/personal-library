@@ -40,6 +40,11 @@ public struct LibraryItem: Identifiable, Sendable {
     public var sourcePaths: [String] = []
     /// A short body prefix for list rows. Snapshots load this instead of the full text.
     public var preview: String = ""
+    /// True when the stored body has any non-whitespace character. Computed by
+    /// SQLite during the snapshot, so filters never need the full text.
+    public var hasBody: Bool = true
+    /// True when the body contains an http(s) link. Also computed by the snapshot.
+    public var hasLinks: Bool = false
     /// False until the reader asks for this item's body.
     public var textLoaded: Bool = true
     /// Set while the item sits in the trash. Trashed items stay on disk for 30 days.

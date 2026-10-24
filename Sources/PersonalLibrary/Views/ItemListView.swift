@@ -6,6 +6,7 @@ struct ItemListView: View {
     @ObservedObject var store: LibraryStore
     @ViewState<ListFocusRequest?> private var focusToRestore = nil
     @ViewState<String?> private var selectionToReveal = nil
+    @State private var showingFilters = false
 
     var body: some View {
         Group {
@@ -106,15 +107,174 @@ struct ItemListView: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            Picker("资料类型", selection: $store.kindFilter) {
-                Text("全部").tag(Optional<ItemKind>.none)
-                ForEach([ItemKind.document, .note, .thought, .image, .other], id: \.self) { kind in
-                    Text(kind.label).tag(Optional(kind))
+            HStack(spacing: 12) {
+                Picker("资料类型", selection: $store.kindFilter) {
+                    Text("全部").tag(Optional<ItemKind>.none)
+                    ForEach([ItemKind.document, .note, .thought, .image, .other], id: \.self) { kind in
+                        Text(kind.label).tag(Optional(kind))
+                    }
                 }
+                .pickerStyle(.segmented).labelsHidden().controlSize(.small)
+                Spacer(minLength: 0)
+                sortMenu
+                filterButton
             }
-            .pickerStyle(.segmented).labelsHidden().controlSize(.small)
             .padding(.horizontal, 14).padding(.vertical, 12)
         }
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker("排序", selection: $store.listOptions.sortField) {
+                ForEach(LibrarySortField.allCases) { field in
+                    Text(field.label).tag(field)
+                }
+            }
+            Divider()
+            Button(store.listOptions.ascending ? "改为降序" : "改为升序") {
+                store.listOptions.ascending.toggle()
+            }
+            if store.listOptions.sortField != .updated || store.listOptions.ascending {
+                Divider()
+                Button("恢复默认排序") {
+                    store.listOptions.sortField = .updated
+                    store.listOptions.ascending = false
+                }
+            }
+        } label: {
+            SwiftUI.Label("\(store.listOptions.sortField.label)\(store.listOptions.ascending ? " ↑" : " ↓")",
+                          systemImage: "arrow.up.arrow.down")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .controlSize(.small)
+        .help("排序：\(store.listOptions.sortField.label)，\(store.listOptions.ascending ? "升序" : "降序")")
+    }
+
+    private var filterButton: some View {
+        Button {
+            showingFilters.toggle()
+        } label: {
+            SwiftUI.Label(store.listOptions.hasFilters ? "筛选 \(store.listOptions.filterCount)" : "筛选",
+                          systemImage: store.listOptions.hasFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .fixedSize()
+        .popover(isPresented: $showingFilters, arrowEdge: .bottom) { filterPanel }
+        .help("按日期、大小和内容筛选")
+    }
+
+    private var filterPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("筛选").font(.headline)
+            Toggle("按创建日期", isOn: dateRangeEnabled)
+            if store.listOptions.startDate != nil || store.listOptions.endDate != nil {
+                HStack(spacing: 12) {
+                    DatePicker("从", selection: startDate, displayedComponents: .date)
+                    DatePicker("到", selection: endDate, displayedComponents: .date)
+                }.datePickerStyle(.compact)
+            }
+            Toggle("按大小", isOn: sizeRangeEnabled)
+            if store.listOptions.minBytes != nil || store.listOptions.maxBytes != nil {
+                HStack(spacing: 8) {
+                    TextField("最小", text: minimumMegabytes).frame(width: 70)
+                    Text("MB").font(.system(size: 11)).foregroundStyle(.secondary)
+                    TextField("最大", text: maximumMegabytes).frame(width: 70)
+                    Text("MB").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            }
+            Divider()
+            Toggle("有正文", isOn: $store.listOptions.onlyWithBody)
+            Toggle("有配图", isOn: $store.listOptions.onlyWithImages)
+            Toggle("有外部链接", isOn: $store.listOptions.onlyWithLinks)
+            Divider()
+            HStack {
+                Text(store.listOptions.hasFilters ? "\(store.displayedItems.count) 项符合条件" : "未设置筛选")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Button("清除筛选") { clearFilters() }
+                    .disabled(!store.listOptions.hasFilters)
+            }
+        }
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .padding(16)
+        .frame(width: 320)
+    }
+
+    private var dateRangeEnabled: Binding<Bool> {
+        Binding(get: { store.listOptions.startDate != nil || store.listOptions.endDate != nil }) { enabled in
+            if enabled {
+                let end = Date()
+                store.listOptions.startDate = Calendar.current.date(byAdding: .month, value: -1, to: end)
+                store.listOptions.endDate = endOfDay(end)
+            } else {
+                store.listOptions.startDate = nil
+                store.listOptions.endDate = nil
+            }
+        }
+    }
+
+    private var startDate: Binding<Date> {
+        Binding(get: { store.listOptions.startDate ?? Calendar.current.startOfDay(for: Date()) }) { date in
+            store.listOptions.startDate = Calendar.current.startOfDay(for: date)
+        }
+    }
+
+    private var endDate: Binding<Date> {
+        Binding(get: { store.listOptions.endDate ?? Date() }) { date in
+            store.listOptions.endDate = endOfDay(date)
+        }
+    }
+
+    private var sizeRangeEnabled: Binding<Bool> {
+        Binding(get: { store.listOptions.minBytes != nil || store.listOptions.maxBytes != nil }) { enabled in
+            if enabled {
+                store.listOptions.minBytes = nil
+                store.listOptions.maxBytes = Int64(10 * 1024 * 1024)
+            } else {
+                store.listOptions.minBytes = nil
+                store.listOptions.maxBytes = nil
+            }
+        }
+    }
+
+    private var minimumMegabytes: Binding<String> {
+        Binding(get: { store.listOptions.minBytes.map(megabytes) ?? "" }) { text in
+            store.listOptions.minBytes = bytes(text)
+        }
+    }
+
+    private var maximumMegabytes: Binding<String> {
+        Binding(get: { store.listOptions.maxBytes.map(megabytes) ?? "" }) { text in
+            store.listOptions.maxBytes = bytes(text)
+        }
+    }
+
+    private func megabytes(_ value: Int64) -> String {
+        let mb = Double(value) / 1_048_576
+        return mb == mb.rounded() ? String(Int(mb)) : String(format: "%.1f", mb)
+    }
+
+    private func bytes(_ text: String) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+        guard let value = Double(trimmed), value >= 0 else { return nil }
+        return Int64(value * 1_048_576)
+    }
+
+    private func endOfDay(_ date: Date) -> Date {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: date)
+        return calendar.date(byAdding: .day, value: 1, to: start)?.addingTimeInterval(-0.001) ?? date
+    }
+
+    private func clearFilters() {
+        let sort = store.listOptions.sortField
+        let ascending = store.listOptions.ascending
+        store.listOptions = LibraryListOptions()
+        store.listOptions.sortField = sort
+        store.listOptions.ascending = ascending
     }
 
     private func restoreListFocus(in window: NSWindow) {
