@@ -99,6 +99,13 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var isRecognizingText = false
     @Published private(set) var hasPendingRestore = false
     @Published private(set) var pendingRestoreName = ""
+    /// Folder whose new files are imported automatically. Remembered across
+    /// launches with a bookmark inside the library.
+    @Published private(set) var inboxFolder: URL?
+    @Published private(set) var isCheckingInbox = false
+    @Published private(set) var inboxError: String?
+    private let inboxWatcher = InboxWatcher()
+    private var inboxState = InboxState()
     /// Mirrors the library into Spotlight. Off means the index is emptied.
     @Published var spotlightEnabled = LibraryStore.spotlightDefault {
         didSet {
@@ -308,6 +315,7 @@ final class LibraryStore: ObservableObject {
             refreshBackups()
             status = restored ? "已从备份恢复，原资料库保留为 \(LibraryBackupStore.safetyCopyName)" : "所有资料仅保存在这台 Mac"
             syncSpotlight()
+            restoreInbox()
             await backupIfDue()
             purgeExpiredTrash()
             backfillFingerprints()
@@ -663,6 +671,141 @@ final class LibraryStore: ObservableObject {
         guard pendingImport != nil else { return }
         pendingImport = nil
         status = "已取消导入"
+    }
+
+    // MARK: 收件箱
+
+    func chooseInboxFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "选择收件箱文件夹"
+        panel.message = "放进这个文件夹的文件会自动导入资料库，原文件留在原地。只处理第一层，不递归子目录。"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "监听此文件夹"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in self?.startWatchingInbox(at: url) }
+        }
+    }
+
+    /// Starts (or restarts) watching. Called by the picker, by `restoreInbox`
+    /// on launch and directly by tests.
+    func startWatchingInbox(at folder: URL) {
+        guard ready else { return }
+        guard FileManager.default.fileExists(atPath: folder.path) else {
+            status = "这个文件夹已不存在，请重新选择"
+            return
+        }
+        inboxWatcher.stop()
+        inboxWatcher.onChange = { [weak self] in self?.checkInbox() }
+        inboxWatcher.start(watching: folder)
+        inboxFolder = folder
+        inboxState = InboxState.load(from: root)
+        inboxState.folderBookmark = bookmarkData(for: folder)
+        inboxState.lastError = nil
+        inboxState.save(in: root)
+        inboxError = nil
+        status = "收件箱已开启：\(folder.lastPathComponent)"
+        _ = checkInbox()
+    }
+
+    func stopWatchingInbox() {
+        inboxWatcher.stop()
+        inboxWatcher.onChange = nil
+        inboxFolder = nil
+        inboxError = nil
+        inboxState = InboxState.load(from: root)
+        inboxState.folderBookmark = nil
+        inboxState.save(in: root)
+        status = "已停止监听收件箱"
+    }
+
+    /// Scans once and imports what is new. Files are remembered by signature, so
+    /// an unchanged file is skipped and a failed one is not retried on every event.
+    @discardableResult
+    func checkInbox() -> Task<Void, Never>? {
+        guard ready, let folder = inboxFolder, let repository, !isCheckingInbox else { return nil }
+        inboxState = InboxState.load(from: root)
+        let candidates = InboxScanner.candidates(in: folder, processed: inboxState.processed)
+        guard !candidates.isEmpty else {
+            inboxError = inboxState.lastError
+            return nil
+        }
+        // A file dropped while another import runs would otherwise wait for a
+        // directory event that never comes back; try again shortly instead.
+        if isImporting {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                self?.checkInbox()
+            }
+            return nil
+        }
+        isCheckingInbox = true
+        status = "收件箱：正在导入 \(candidates.count) 个文件…"
+        return Task {
+            defer { isCheckingInbox = false }
+            var imported = 0
+            var skipped = 0
+            var failures: [String] = []
+            for candidate in candidates {
+                let name = candidate.url.lastPathComponent
+                do {
+                    let preview = try await repository.previewImport([candidate.url])
+                    if preview.pending.isEmpty {
+                        if preview.failures.isEmpty { skipped += 1 } else { failures += preview.failures.map { "\(name)：\($0)" } }
+                    } else {
+                        let report = try await repository.importFiles(preview, skippingDuplicates: true)
+                        imported += report.importedIDs.count
+                        skipped += report.skipped.count
+                        failures += report.failures.map { "\(name)：\($0)" }
+                    }
+                } catch {
+                    failures.append("\(name)：\(error.localizedDescription)")
+                }
+                // Remembered even on failure: a file that cannot be read should
+                // not be retried on every event, only when it changes again.
+                inboxState.mark(name, signature: candidate.signature)
+            }
+            inboxState.lastError = failures.isEmpty ? nil : failures.joined(separator: "\n\n")
+            inboxState.save(in: root)
+            inboxError = inboxState.lastError
+            if imported > 0 { try? await reload() }
+            var parts: [String] = []
+            if imported > 0 { parts.append("收件箱：导入 \(imported) 项") }
+            if skipped > 0 { parts.append("跳过 \(skipped) 个已有文件") }
+            if !failures.isEmpty { parts.append("\(failures.count) 个未成功") }
+            status = parts.isEmpty ? "收件箱：没有新文件" : parts.joined(separator: "，")
+        }
+    }
+
+    /// Restores the folder chosen last time. A stale bookmark still resolves to
+    /// the same path, so the folder only needs picking again after it moved.
+    private func restoreInbox() {
+        inboxState = InboxState.load(from: root)
+        guard let data = inboxState.folderBookmark else { return }
+        var stale = false
+        let scoped = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope],
+                             relativeTo: nil, bookmarkDataIsStale: &stale)
+        let plain = scoped ?? (try? URL(resolvingBookmarkData: data, options: [],
+                                        relativeTo: nil, bookmarkDataIsStale: &stale))
+        // The folder can be moved or deleted between launches, and a bookmark to
+        // a missing folder may fail to resolve at all; forgetting it is better
+        // than claiming to watch something that is gone.
+        if let folder = plain, FileManager.default.fileExists(atPath: folder.path) {
+            _ = folder.startAccessingSecurityScopedResource()
+            startWatchingInbox(at: folder)
+            return
+        }
+        inboxState.folderBookmark = nil
+        inboxState.save(in: root)
+        status = "收件箱文件夹已不存在，请重新选择"
+    }
+
+    private func bookmarkData(for folder: URL) -> Data? {
+        let scoped = try? folder.bookmarkData(options: [.withSecurityScope],
+                                              includingResourceValuesForKeys: nil, relativeTo: nil)
+        return scoped ?? (try? folder.bookmarkData(includingResourceValuesForKeys: nil, relativeTo: nil))
     }
 
     private func finishImport(_ preview: LibraryRepository.ImportPreview, skippingDuplicates: Bool) async throws {

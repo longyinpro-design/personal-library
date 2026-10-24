@@ -43,6 +43,31 @@ struct SettingsView: View {
                 }
                 Text("备份由 SQLite 自身写出（VACUUM INTO），包含笔记、正文、标签与索引。导入到 Files/ 的文件副本不在备份内，原文件仍在原位置。恢复只替换数据库，不会删除这些副本。")
             }
+            Section("收件箱") {
+                LabeledContent("文件夹") {
+                    if let folder = store.inboxFolder {
+                        Text(folder.path)
+                            .font(.system(size: 11, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } else {
+                        Text("未设置")
+                    }
+                }
+                HStack(spacing: 10) {
+                    Button("选择文件夹…") { store.chooseInboxFolder() }
+                        .disabled(!store.ready)
+                    Button(store.isCheckingInbox ? "正在导入…" : "立即导入") { store.checkInbox() }
+                        .disabled(!store.ready || store.inboxFolder == nil || store.isCheckingInbox)
+                    if store.inboxFolder != nil {
+                        Button("停止监听") { store.stopWatchingInbox() }
+                    }
+                }
+                if let error = store.inboxError {
+                    Text(error).font(.system(size: 11)).foregroundStyle(.orange).textSelection(.enabled)
+                }
+                Text("放进这个文件夹的文件会自动导入，只处理第一层。已导入的内容按文件指纹跳过，改动过才会再试一次。文件留在原处，不移动、不删除；App 未运行时不会监听。")
+            }
             Section("文字识别") {
                 LabeledContent("待识别") {
                     if store.ocrPending == 0 {
@@ -76,7 +101,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .font(.system(size: 12))
-        .frame(width: 570, height: 540)
+        .frame(width: 570, height: 620)
         .fileImporter(isPresented: $selectingBackup, allowedContentTypes: [.database, .data], allowsMultipleSelection: false) { result in
             guard case let .success(urls) = result, let url = urls.first else {
                 if case let .failure(error) = result { store.errorMessage = error.localizedDescription }
