@@ -174,7 +174,7 @@ struct DetailView: View {
     /// The topmost visible block wins, so the anchor follows what the reader
     /// actually sees instead of whichever lazy row happens to appear last.
     private func record(anchor: ReadingAnchor?, for item: LibraryItem) {
-        guard !isRestoringPosition, let anchor else { return }
+        guard !isRestoringPosition, !item.isTrashed, let anchor else { return }
         currentAnchor = anchor
         store.rememberReadingAnchor(anchor, for: item.id)
     }

@@ -33,7 +33,7 @@ struct LibraryStoreReadingTests {
         #expect(store.readingAnchor(for: "unknown") == nil)
     }
 
-    @Test func reloadDropsAnchorsForDeletedItemsAndKeepsTheRest() async throws {
+    @Test func trashingKeepsTheAnchorAndOnlyDestroyingDropsIt() async throws {
         let (repo, root) = try makeRepository("prune")
         defer { try? FileManager.default.removeItem(at: root) }
         let kept = try await repo.saveNote(title: "保留", body: "正文", kind: .note)
@@ -45,6 +45,12 @@ struct LibraryStoreReadingTests {
         store.requestTrash([removed])
         await store.confirmDelete()
 
+        // The trash keeps the position so restoring returns the reader to it.
+        #expect(store.readingAnchor(for: removed) == .bodyChunk(5))
+        #expect(store.readingAnchor(for: kept) == .bodyChunk(2))
+
+        store.requestPermanentDelete([removed])
+        await store.confirmDelete()
         #expect(store.readingAnchor(for: removed) == nil)
         #expect(store.readingAnchor(for: kept) == .bodyChunk(2))
     }

@@ -20,6 +20,7 @@ struct MarkdownImageDirectoryTests {
             try old.execute("ALTER TABLE items DROP COLUMN deleted_at")
             try old.execute("ALTER TABLE items DROP COLUMN fingerprint")
             try old.execute("ALTER TABLE items DROP COLUMN ocr_version")
+            try old.execute("ALTER TABLE items DROP COLUMN reading_position")
             try old.execute("PRAGMA user_version = 1")
             try old.execute("INSERT INTO collections VALUES ('c', '资料')")
             try old.execute("INSERT INTO items VALUES ('id','旧笔记','note',NULL,'中文原文',NULL,12,100,200,'c',1)")

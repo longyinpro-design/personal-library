@@ -32,7 +32,7 @@ enum MarkdownScrollTarget: Hashable, Sendable {
 /// A coarse, lazy-layout-safe reading position. Markdown is remembered by
 /// section and plain text by chunk; pixel offsets are not stable while
 /// `LazyVStack` is still materializing.
-enum ReadingAnchor: Hashable {
+enum ReadingAnchor: Hashable, Codable {
     case markdownSection(Int)
     case bodyChunk(Int)
 }
