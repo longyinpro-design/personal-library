@@ -65,6 +65,11 @@ struct RuleEditorView: View {
 private struct RuleRow: View {
     @Binding var rule: LibraryRule
     var onDelete: () -> Void
+    /// Raw text for the two fields that are parsed. Binding them straight to the
+    /// model would rewrite "财务，" back to "财务" while typing, so the separator
+    /// could never be finished.
+    @State private var collectionText = ""
+    @State private var tagsText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -82,23 +87,26 @@ private struct RuleRow: View {
                 .help("删除这条规则")
             }
             HStack(spacing: 8) {
-                TextField("归入目录（可留空）", text: Binding(
-                    get: { rule.collection ?? "" },
-                    set: { rule.collection = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
-                TextField("标签，逗号分隔", text: Binding(
-                    get: { rule.tags.joined(separator: "，") },
-                    set: { rule.tags = Self.parse($0) }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
+                TextField("归入目录（可留空）", text: $collectionText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .onChange(of: collectionText) { _, new in
+                        let trimmed = new.trimmingCharacters(in: .whitespaces)
+                        rule.collection = trimmed.isEmpty ? nil : trimmed
+                    }
+                TextField("标签，逗号分隔", text: $tagsText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .onChange(of: tagsText) { _, new in rule.tags = Self.parse(new) }
             }
         }
         .padding(10)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
         .opacity(rule.isEnabled ? 1 : 0.55)
+        .onAppear {
+            collectionText = rule.collection ?? ""
+            tagsText = rule.tags.joined(separator: "，")
+        }
     }
 
     /// Accepts the separators people actually type; empty pieces are dropped.
