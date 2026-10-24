@@ -27,6 +27,13 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      # Optional signing material. Empty secrets keep the ad-hoc build path.
+      MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+      NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+      NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
     steps:
       - name: Check out
         uses: actions/checkout@v7
@@ -60,6 +67,24 @@ jobs:
           xcodebuild -version
           swift --version
 
+      # Runs only when the repository has a Developer ID certificate. The
+      # temporary keychain is deleted at the end of the job either way.
+      - name: Import Developer ID certificate
+        if: env.MACOS_CERTIFICATE_P12 != ''
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          cert="$RUNNER_TEMP/cert.p12"
+          trap 'rm -f "$cert"' EXIT
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$cert"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+          security import "$cert" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k actions "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+
       - name: Build app bundle
         env:
           PERSONAL_LIBRARY_VERSION: ${{ steps.version.outputs.version }}
@@ -68,6 +93,10 @@ jobs:
       - name: Package DMG and checksum
         env:
           PERSONAL_LIBRARY_VERSION: ${{ steps.version.outputs.version }}
+          PERSONAL_LIBRARY_SIGN_IDENTITY: ${{ env.MACOS_SIGN_IDENTITY }}
+          PERSONAL_LIBRARY_NOTARY_APPLE_ID: ${{ env.NOTARY_APPLE_ID }}
+          PERSONAL_LIBRARY_NOTARY_TEAM_ID: ${{ env.NOTARY_TEAM_ID }}
+          PERSONAL_LIBRARY_NOTARY_PASSWORD: ${{ env.NOTARY_PASSWORD }}
         run: ./script/package_dmg.sh --skip-build
 
       - name: Verify checksums before upload
@@ -128,6 +157,10 @@ jobs:
             echo "published checksum differs from the built DMG" >&2
             exit 1
           fi
+
+      - name: Remove signing keychain
+        if: always() && env.MACOS_CERTIFICATE_P12 != ''
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
 
       - name: Write job summary
         run: |
