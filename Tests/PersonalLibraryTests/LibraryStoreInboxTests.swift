@@ -95,6 +95,21 @@ struct LibraryStoreInboxTests {
         relaunched.stopWatchingInbox()
     }
 
+    @Test func aFolderThatDisappearedIsForgottenQuietly() async throws {
+        let (root, inbox, store) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var state = InboxState()
+        state.folderBookmark = try inbox.bookmarkData(includingResourceValuesForKeys: nil, relativeTo: nil)
+        state.save(in: store.root)
+        try FileManager.default.removeItem(at: inbox)
+
+        let relaunched = LibraryStore(root: store.root)
+        await relaunched.load()
+
+        #expect(relaunched.inboxFolder == nil)
+        #expect(InboxState.load(from: store.root).folderBookmark == nil)
+    }
+
     @Test func stoppingLeavesTheFolderAlone() async throws {
         let (root, inbox, store) = try await fixture()
         defer { try? FileManager.default.removeItem(at: root) }

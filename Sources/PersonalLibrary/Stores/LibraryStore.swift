@@ -693,6 +693,10 @@ final class LibraryStore: ObservableObject {
     /// on launch and directly by tests.
     func startWatchingInbox(at folder: URL) {
         guard ready else { return }
+        guard FileManager.default.fileExists(atPath: folder.path) else {
+            status = "这个文件夹已不存在，请重新选择"
+            return
+        }
         inboxWatcher.stop()
         inboxWatcher.onChange = { [weak self] in self?.checkInbox() }
         inboxWatcher.start(watching: folder)
@@ -785,9 +789,17 @@ final class LibraryStore: ObservableObject {
                              relativeTo: nil, bookmarkDataIsStale: &stale)
         let plain = scoped ?? (try? URL(resolvingBookmarkData: data, options: [],
                                         relativeTo: nil, bookmarkDataIsStale: &stale))
-        guard let folder = plain else { return }
-        _ = folder.startAccessingSecurityScopedResource()
-        startWatchingInbox(at: folder)
+        // The folder can be moved or deleted between launches, and a bookmark to
+        // a missing folder may fail to resolve at all; forgetting it is better
+        // than claiming to watch something that is gone.
+        if let folder = plain, FileManager.default.fileExists(atPath: folder.path) {
+            _ = folder.startAccessingSecurityScopedResource()
+            startWatchingInbox(at: folder)
+            return
+        }
+        inboxState.folderBookmark = nil
+        inboxState.save(in: root)
+        status = "收件箱文件夹已不存在，请重新选择"
     }
 
     private func bookmarkData(for folder: URL) -> Data? {
