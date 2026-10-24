@@ -13,6 +13,7 @@ struct DetailView: View {
     @State private var findGeneration = 0
     @State private var markdownSections: [String] = []
     @State private var currentAnchor: ReadingAnchor?
+    @State private var imageViewerRequest: ImageViewerRequest?
     @State private var visibleChunks: Set<Int> = []
     @State private var visibleSections: Set<Int> = []
     @State private var restoreAnchor: ReadingAnchor?
@@ -73,6 +74,14 @@ struct DetailView: View {
                     .padding(28)
                 }
             }
+            .environment(\.openImageViewer) { request in
+                imageViewerRequest = request
+            }
+            .sheet(item: $imageViewerRequest) { request in
+                ImageViewer(url: request.url, title: request.title,
+                            onClose: { imageViewerRequest = nil }, minimumHeight: 520)
+                    .frame(minWidth: 720, minHeight: 620)
+            }
             .task(id: item.id) {
                 if restoreAnchor == nil {
                     restoreAnchor = store.readingAnchor(for: item.id)
@@ -106,7 +115,9 @@ struct DetailView: View {
 
     @ViewBuilder
     private func readerBody(_ item: LibraryItem, proxy: ScrollViewProxy) -> some View {
-        if !item.isEditable && (showSystemPreview || item.kind == .image || item.fileExtension == "PDF") {
+        if item.kind == .image, let url = try? store.fileURL(item) {
+            ImageViewer(url: url, title: item.title)
+        } else if !item.isEditable && (showSystemPreview || item.kind == .image || item.fileExtension == "PDF") {
             systemPreview(item)
         } else if !item.textLoaded {
             ProgressView("正在载入正文…")
