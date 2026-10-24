@@ -5,7 +5,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum LibraryScope: Hashable, Sendable {
-    case recent, all, inbox, notes, thoughts, favorites, history, trash, collection(String)
+    case recent, all, inbox, notes, thoughts, favorites, history, trash, collection(String), tag(String)
     var title: String {
         switch self {
         case .recent: return "最近添加"
@@ -17,6 +17,7 @@ enum LibraryScope: Hashable, Sendable {
         case .history: return "整理记录"
         case .trash: return "回收站"
         case .collection: return "目录"
+        case .tag: return "标签"
         }
     }
 }
@@ -119,6 +120,7 @@ final class LibraryStore: ObservableObject {
 
     var scopeTitle: String {
         if case .collection(let id) = scope { return collectionName(id) }
+        if case .tag(let name) = scope { return "#" + name }
         return scope.title
     }
 
@@ -200,6 +202,7 @@ final class LibraryStore: ObservableObject {
         case .thoughts: filter.kind = .thought
         case .favorites: filter.favoritesOnly = true
         case .collection(let id): filter.collectionID = id
+        case .tag(let name): filter.tagName = name
         case .trash: break
         }
         if let kind { filter.kind = kind }
@@ -215,6 +218,7 @@ final class LibraryStore: ObservableObject {
             case .thoughts: return item.kind == .thought
             case .favorites: return item.favorite
             case .collection(let id): return item.collectionID == id
+            case .tag(let name): return item.tags.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
             case .history, .trash: return false
             }
         }
@@ -615,6 +619,91 @@ final class LibraryStore: ObservableObject {
             } catch {
                 errorMessage = error.localizedDescription
                 status = "收藏未完成"
+            }
+        }
+    }
+
+    // MARK: 标签
+
+    /// The sheet works on a fixed list of items so a scope or search change
+    /// behind it cannot retarget the tags.
+    struct TagEditorRequest: Identifiable, Equatable {
+        let id = UUID()
+        let itemIDs: [String]
+    }
+
+    @Published var tagEditorRequest: TagEditorRequest?
+
+    var tagEditorItems: [LibraryItem] { items(for: Set(tagEditorRequest?.itemIDs ?? [])) }
+
+    func beginTagEditing(ids: Set<String>) {
+        guard ready, !isBatchUpdating, !ids.isEmpty else { return }
+        tagEditorRequest = TagEditorRequest(itemIDs: items(for: ids).map(\.id))
+    }
+
+    func endTagEditing() { tagEditorRequest = nil }
+
+    /// Tags the whole selection the same way, so the sheet's checkboxes always
+    /// mean "applies to every selected item".
+    @discardableResult
+    func applyTags(_ names: [String], to ids: [String]) -> Task<Void, Never>? {
+        guard ready, !isBatchUpdating, let repository, !ids.isEmpty else { return nil }
+        isBatchUpdating = true
+        tagEditorRequest = nil
+        let cleaned = names.sorted()
+        return Task {
+            defer { isBatchUpdating = false }
+            do {
+                try await repository.setTags(cleaned, for: ids)
+                try await reload()
+                status = cleaned.isEmpty
+                    ? (ids.count == 1 ? "已清除标签" : "已清除 \(ids.count) 项资料的标签")
+                    : (ids.count == 1 ? "已设置标签" : "已为 \(ids.count) 项资料设置标签")
+            } catch {
+                errorMessage = error.localizedDescription
+                status = "标签未保存"
+            }
+        }
+    }
+
+    @discardableResult
+    func deleteTag(_ tag: LibraryTag) -> Task<Void, Never>? {
+        guard ready, !isBatchUpdating, let repository else { return nil }
+        isBatchUpdating = true
+        return Task {
+            defer { isBatchUpdating = false }
+            do {
+                try await repository.deleteTag(id: tag.id)
+                if case .tag(let name) = scope, name.caseInsensitiveCompare(tag.name) == .orderedSame {
+                    navigate(.all)
+                }
+                try await reload()
+                status = "已删除标签「\(tag.name)」，资料都还在"
+            } catch {
+                errorMessage = error.localizedDescription
+                status = "标签未删除"
+            }
+        }
+    }
+
+    @discardableResult
+    func renameTag(_ tag: LibraryTag, to name: String) -> Task<Void, Never>? {
+        guard ready, !isBatchUpdating, let repository else { return nil }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != tag.name else { return nil }
+        isBatchUpdating = true
+        return Task {
+            defer { isBatchUpdating = false }
+            do {
+                try await repository.renameTag(id: tag.id, to: trimmed)
+                if case .tag(let current) = scope, current.caseInsensitiveCompare(tag.name) == .orderedSame {
+                    scope = .tag(trimmed)
+                }
+                try await reload()
+                status = "已重命名为「\(trimmed)」"
+            } catch {
+                errorMessage = error.localizedDescription
+                status = "标签未重命名"
             }
         }
     }

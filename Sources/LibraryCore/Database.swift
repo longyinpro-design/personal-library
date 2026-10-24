@@ -5,7 +5,7 @@ import Foundation
 final class Database {
     /// Current schema version, written to `PRAGMA user_version`. Backups record
     /// theirs, so this is the one place that knows what a build can read.
-    static let schemaVersion = 7
+    static let schemaVersion = 8
 
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -77,6 +77,21 @@ final class Database {
                 try execute("ALTER TABLE items ADD COLUMN fingerprint TEXT")
             }
             try execute("CREATE INDEX IF NOT EXISTS items_fingerprint ON items(fingerprint)")
+            // Version 8: tags are many-to-many with items. Deleting an item or a tag
+            // removes only the links, never the other side.
+            try execute("""
+                CREATE TABLE IF NOT EXISTS tags (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE
+                )
+                """)
+            try execute("""
+                CREATE TABLE IF NOT EXISTS item_tags (
+                    item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    PRIMARY KEY (item_id, tag_id)
+                )
+                """)
+            try execute("CREATE INDEX IF NOT EXISTS item_tags_tag ON item_tags(tag_id)")
             try execute("""
                 CREATE TABLE IF NOT EXISTS markdown_images (
                     item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,

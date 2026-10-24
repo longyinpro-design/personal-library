@@ -1,7 +1,10 @@
 import SwiftUI
+import LibraryCore
 
 struct SidebarView: View {
     @ObservedObject var store: LibraryStore
+    @State private var renaming: LibraryTag?
+    @State private var renameText = ""
     private var selection: Binding<LibraryScope?> {
         Binding(get: { store.scope }, set: { if let target = $0 { store.navigate(target) } })
     }
@@ -28,11 +31,31 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.plain).disabled(!store.ready)
             }
+            Section("标签") {
+                let tags = store.snapshot.tags.filter { $0.count > 0 }
+                ForEach(tags) { tag in
+                    tagRow(tag)
+                }
+                if tags.isEmpty {
+                    Text("给资料打标签后出现在这里").font(.caption).foregroundStyle(.secondary)
+                }
+            }
             Section {
                 row("回收站", symbol: "trash", scope: .trash, count: store.trashedCount)
             }
         }
         .listStyle(.sidebar)
+        .alert("重命名标签", isPresented: Binding(get: { renaming != nil },
+                                                 set: { if !$0 { renaming = nil } })) {
+            TextField("标签名称", text: $renameText)
+            Button("重命名") {
+                if let tag = renaming { store.renameTag(tag, to: renameText) }
+                renaming = nil
+            }
+            Button("取消", role: .cancel) { renaming = nil }
+        } message: {
+            Text("资料和标签的关联会一起改名。")
+        }
         .navigationTitle("个人资料库")
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack {
@@ -42,6 +65,22 @@ struct SidebarView: View {
                 SettingsLink { Image(systemName: "gearshape") }
                     .buttonStyle(.borderless).help("设置").accessibilityLabel("设置")
             }.padding(16)
+        }
+    }
+
+    private func tagRow(_ tag: LibraryTag) -> some View {
+        HStack {
+            Label("#" + tag.name, systemImage: "number")
+            Spacer(minLength: 0)
+            Text(tag.count, format: .number).font(.caption).foregroundStyle(.secondary)
+        }
+        .tag(LibraryScope.tag(tag.name))
+        .contextMenu {
+            Button("重命名…") {
+                renameText = tag.name
+                renaming = tag
+            }
+            Button("删除标签", role: .destructive) { store.deleteTag(tag) }
         }
     }
 

@@ -379,6 +379,7 @@ struct DetailView: View {
         VStack(alignment: .leading, spacing: 17) {
             FileBadge(item: item, large: true)
             Text(item.title).font(.system(size: 24, weight: .semibold)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            tagRow(item)
             Text("\(item.kind.label)  ·  \(item.updatedAt.formatted(date: .long, time: .omitted))")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack(spacing: 10) {
@@ -409,6 +410,34 @@ struct DetailView: View {
                 Text(ByteCountFormatter.string(fromByteCount: item.byteCount, countStyle: .file))
                     .font(.system(size: 10)).foregroundStyle(.tertiary)
             }.padding(.top, 3)
+        }
+    }
+
+    /// Tags double as a filter: clicking one opens that tag's list.
+    private func tagRow(_ item: LibraryItem) -> some View {
+        HStack(spacing: 6) {
+            if item.tags.isEmpty {
+                Text("没有标签").font(.system(size: 11)).foregroundStyle(.tertiary)
+            }
+            ForEach(item.tags, id: \.self) { name in
+                Button { store.navigate(.tag(name)) } label: {
+                    Text("#" + name).font(.system(size: 11))
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(.quaternary, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("只看带 #\(name) 的资料")
+            }
+            if !item.isTrashed {
+                Button { store.beginTagEditing(ids: [item.id]) } label: {
+                    Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
+                        .padding(4)
+                }
+                .buttonStyle(.plain)
+                .help("添加标签")
+                .accessibilityLabel("添加标签")
+            }
+            Spacer(minLength: 0)
         }
     }
 

@@ -47,6 +47,8 @@ public struct LibraryItem: Identifiable, Sendable {
     public var hasLinks: Bool = false
     /// False until the reader asks for this item's body.
     public var textLoaded: Bool = true
+    /// Tag names, sorted. A tag belongs to many items and an item to many tags.
+    public var tags: [String] = []
     /// Set while the item sits in the trash. Trashed items stay on disk for 30 days.
     public var deletedAt: Date? = nil
     public var isTrashed: Bool { deletedAt != nil }
@@ -54,6 +56,19 @@ public struct LibraryItem: Identifiable, Sendable {
     public var usesMarkdown: Bool { isEditable || ["MD", "MARKDOWN"].contains(fileExtension) }
     public var fileExtension: String {
         relativePath.map { URL(fileURLWithPath: $0).pathExtension.uppercased() } ?? (kind == .note ? "NOTE" : "MEMO")
+    }
+}
+
+public struct LibraryTag: Identifiable, Sendable, Hashable {
+    public let id: String
+    public let name: String
+    /// How many live items carry this tag. Trashed items do not count.
+    public let count: Int
+
+    public init(id: String, name: String, count: Int = 0) {
+        self.id = id
+        self.name = name
+        self.count = count
     }
 }
 
@@ -84,6 +99,8 @@ public struct LibrarySnapshot: Sendable {
     /// Items in the trash, newest deletion first. Kept apart so counts and
     /// totals never include them.
     public var trashed: [LibraryItem] = []
+    /// Every tag, with its live item count, ordered by name.
+    public var tags: [LibraryTag] = []
     public var collections: [LibraryCollection] = []
     public var activities: [LibraryActivity] = []
     public init() {}
@@ -129,6 +146,25 @@ public enum LibraryError: LocalizedError {
 }
 
 public enum LibrarySearch {
+    /// Pulls `tag:名称` out of a query. Everything else stays as search terms, so
+    /// `合同 tag:法务` narrows to the tag without losing the word search.
+    public static func split(_ query: String) -> (terms: String, tag: String?) {
+        var tag: String?
+        var words: [String] = []
+        for word in query.split(whereSeparator: \.isWhitespace) {
+            let text = String(word)
+            if tag == nil, text.lowercased().hasPrefix("tag:") {
+                let name = text.dropFirst(4).trimmingCharacters(in: .whitespaces)
+                if !name.isEmpty {
+                    tag = name
+                    continue
+                }
+            }
+            words.append(text)
+        }
+        return (words.joined(separator: " "), tag)
+    }
+
     public static func matches(_ item: LibraryItem, query: String) -> Bool {
         let terms = query.split(whereSeparator: \.isWhitespace)
         return terms.allSatisfy { term in
