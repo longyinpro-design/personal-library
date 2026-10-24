@@ -631,6 +631,24 @@ public actor LibraryRepository {
     private func record(_ message: String) throws {
         try database.execute("INSERT INTO activities (id,message,date) VALUES (?,?,?)", [UUID().uuidString, message, String(Date().timeIntervalSince1970)])
     }
+
+    /// Writes a consistent copy of the database into `Backups/` and rotates old
+    /// copies. Notes are in SQLite; the imported file copies under `Files/` are
+    /// not part of this snapshot.
+    @discardableResult
+    public func createBackup(at date: Date = Date()) throws -> LibraryBackup {
+        let directory = try LibraryBackupStore.makeDirectory(in: root)
+        let url = directory.appendingPathComponent(LibraryBackupStore.fileName(for: date))
+        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+        try database.backup(to: url)
+        try LibraryBackupStore.prune(in: root)
+        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? 0
+        return LibraryBackup(url: url, date: date, byteCount: size)
+    }
+
+    public func backups() throws -> [LibraryBackup] {
+        try LibraryBackupStore.backups(in: root)
+    }
 }
 
 private struct DeletedLibraryItem {

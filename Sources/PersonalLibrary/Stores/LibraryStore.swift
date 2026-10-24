@@ -91,6 +91,10 @@ final class LibraryStore: ObservableObject {
     @Published var ready = false
     @Published var focusSearch = false
     @Published var showNewCollection = false
+    @Published private(set) var backups: [LibraryBackup] = []
+    @Published private(set) var isBackingUp = false
+    @Published private(set) var hasPendingRestore = false
+    @Published private(set) var pendingRestoreName = ""
     let root: URL
     private var repository: LibraryRepository?
     private var bodyCache: [String: String] = [:]
@@ -266,12 +270,23 @@ final class LibraryStore: ObservableObject {
 
     func load() async {
         guard repository == nil else { return }
+        var restored = false
+        do {
+            // Applies a staged restore before the database is opened, so the live
+            // library is never swapped while SQLite holds it.
+            restored = try LibraryBackupStore.applyPendingRestore(in: root)
+        } catch {
+            errorMessage = error.localizedDescription
+            status = "从备份恢复失败"
+        }
         do {
             let root = root
             repository = try await Task.detached { try LibraryRepository(root: root) }.value
             try await reload()
             ready = true
-            status = "所有资料仅保存在这台 Mac"
+            refreshBackups()
+            status = restored ? "已从备份恢复，原资料库保留为 \(LibraryBackupStore.safetyCopyName)" : "所有资料仅保存在这台 Mac"
+            await backupIfDue()
             purgeExpiredTrash()
             backfillFingerprints()
         } catch { errorMessage = error.localizedDescription; status = "资料库打开失败" }
@@ -301,6 +316,56 @@ final class LibraryStore: ObservableObject {
                 if !report.warnings.isEmpty { errorMessage = report.warnings.joined(separator: "\n\n") }
             } catch { errorMessage = error.localizedDescription }
         }
+    }
+
+    // MARK: 备份与恢复
+
+    func refreshBackups() {
+        backups = (try? LibraryBackupStore.backups(in: root)) ?? []
+        hasPendingRestore = LibraryBackupStore.pendingRestore(in: root) != nil
+    }
+
+    var backupDirectory: URL { LibraryBackupStore.directory(in: root) }
+
+    /// One backup a day; the library is opened often enough that a launch-based
+    /// schedule needs no timer.
+    func backupIfDue() async {
+        if let newest = backups.first, Date().timeIntervalSince(newest.date) < 24 * 60 * 60 { return }
+        await createBackup()
+    }
+
+    func createBackup() async {
+        guard let repository, !isBackingUp else { return }
+        isBackingUp = true
+        defer { isBackingUp = false }
+        do {
+            let backup = try await repository.createBackup()
+            refreshBackups()
+            status = "已备份 \(backup.name)"
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Validates the file and stages it; nothing changes until the next launch.
+    func prepareRestore(from url: URL) {
+        do {
+            try LibraryBackupStore.stageRestore(from: url, in: root)
+            pendingRestoreName = url.lastPathComponent
+            refreshBackups()
+            status = "下次启动时恢复 \(url.lastPathComponent)"
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func cancelPendingRestore() {
+        do {
+            try LibraryBackupStore.cancelPendingRestore(in: root)
+            pendingRestoreName = ""
+            refreshBackups()
+            status = "已取消恢复"
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func revealBackups() {
+        NSWorkspace.shared.open((try? LibraryBackupStore.makeDirectory(in: root)) ?? root)
     }
 
     func selectVisibleItem() {
