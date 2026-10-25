@@ -5,7 +5,7 @@ import Foundation
 final class Database {
     /// Current schema version, written to `PRAGMA user_version`. Backups record
     /// theirs, so this is the one place that knows what a build can read.
-    static let schemaVersion = 11
+    static let schemaVersion = 12
 
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -26,8 +26,25 @@ final class Database {
         try execute("PRAGMA mmap_size = \(Self.mmapBytes)")
     }
 
+    /// Shared by the migration backfill and the triggers, so all three columns
+    /// always come from the same expression.
+    static let derivedUpdate = """
+        UPDATE items SET preview = substr(body, 1, 240),
+                         has_body = (length(trim(body)) > 0),
+                         has_links = (instr(body, '](http') > 0 OR instr(body, '<http') > 0)
+        WHERE 1
+        """
+
     /// Mapping the file lets the scanning path read pages without a copy.
     private static let mmapBytes = 256 * 1024 * 1024
+
+    /// Monotonic count of rows this connection has changed. The store compares
+    /// it before and after a mutation to skip a refresh that would read exactly
+    /// the same rows again.
+    var totalChanges: Int64 {
+        guard let handle else { return 0 }
+        return Int64(sqlite3_total_changes(handle))
+    }
 
     /// Total size of the database file in bytes, used to decide whether a short
     /// query is worth splitting across cores.
@@ -113,6 +130,34 @@ final class Database {
                 try execute("ALTER TABLE collections ADD COLUMN parent_id TEXT")
             }
             try execute("CREATE INDEX IF NOT EXISTS collections_parent ON collections(parent_id)")
+            // Version 12 keeps the three values the list needs next to the row.
+            // Selecting them used to mean `substr(body, …)`, `length(trim(body))`
+            // and `instr(body, …)`, so every refresh read every body off its
+            // overflow pages. Triggers keep the columns honest for every write
+            // path, including the ones added later.
+            let needsDerived = try !hasColumn("preview", in: "items")
+            if needsDerived, ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"].contains(version) {
+                try execute("ALTER TABLE items ADD COLUMN preview TEXT")
+                try execute("ALTER TABLE items ADD COLUMN has_body INTEGER NOT NULL DEFAULT 0")
+                try execute("ALTER TABLE items ADD COLUMN has_links INTEGER NOT NULL DEFAULT 0")
+                // Old rows are filled in batches after launch: rewriting every
+                // body here would make the first start after an upgrade wait on
+                // a full table rewrite.
+            }
+            // Partial index so the catch-up batches never scan the whole table.
+            try execute("CREATE INDEX IF NOT EXISTS items_derived_pending ON items(id) WHERE preview IS NULL")
+            try execute("""
+                CREATE TRIGGER IF NOT EXISTS items_derived_insert AFTER INSERT ON items
+                BEGIN
+                    \(Self.derivedUpdate.replacingOccurrences(of: "WHERE 1", with: "WHERE id = new.id;"))
+                END
+                """)
+            try execute("""
+                CREATE TRIGGER IF NOT EXISTS items_derived_update AFTER UPDATE OF body ON items
+                BEGIN
+                    \(Self.derivedUpdate.replacingOccurrences(of: "WHERE 1", with: "WHERE id = new.id;"))
+                END
+                """)
             try execute("""
                 CREATE TABLE IF NOT EXISTS markdown_images (
                     item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,

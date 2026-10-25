@@ -130,6 +130,10 @@ final class LibraryStore: ObservableObject {
     private var bodyCache: [String: String] = [:]
     private var readingAnchors: [String: ReadingAnchor] = [:]
     private var pendingPositions: [String: ReadingAnchor] = [:]
+    /// Row-change counter at the last full read; `reload()` skips when it matches.
+    private var lastSeenChanges: Int64?
+    /// How many times the library was actually read, for tests and debugging.
+    private(set) var snapshotReads = 0
     private var positionFlush: Task<Void, Never>?
     private var suppressSearch = false
     @Published private(set) var bodyLoadingIDs: Set<String> = []
@@ -337,7 +341,24 @@ final class LibraryStore: ObservableObject {
             purgeExpiredTrash()
             backfillFingerprints()
             backfillOCR()
+            backfillDerived()
         } catch { errorMessage = error.localizedDescription; status = "资料库打开失败" }
+    }
+
+    /// Rows written before the list columns existed get them filled in here, a
+    /// batch at a time, so an upgrade never stalls on one huge rewrite. Each
+    /// finished batch also shows a fresher list, hence the reload at the end.
+    private func backfillDerived() {
+        Task { [weak self] in
+            guard let self, let repository = self.repository else { return }
+            var filled = 0
+            while !Task.isCancelled {
+                let count = (try? await repository.backfillDerived()) ?? 0
+                if count == 0 { break }
+                filled += count
+            }
+            if filled > 0 { try? await self.reload() }
+        }
     }
 
     /// Items imported before version 7 have no fingerprint, so duplicate detection
@@ -1530,6 +1551,11 @@ final class LibraryStore: ObservableObject {
 
     private func reload() async throws {
         guard let repository else { return }
+        // Several actions reload after one mutation (and batch calls mutate the
+        // snapshot in place instead). Reading the whole library twice for one
+        // change is pure waste, so the row-change counter decides.
+        let changes = try? await repository.changeCount()
+        if let changes, changes == lastSeenChanges { return }
         let cached = bodyCache
         let next = try await repository.snapshot()
         let ids = Set(next.items.map(\.id))
@@ -1544,5 +1570,7 @@ final class LibraryStore: ObservableObject {
         suppressSearch = false
         scheduleSearch()
         syncSpotlight()
+        lastSeenChanges = changes
+        snapshotReads += 1
     }
 }
