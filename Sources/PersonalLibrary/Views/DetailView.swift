@@ -412,11 +412,9 @@ struct DetailView: View {
                 Image(systemName: "folder").foregroundStyle(.secondary)
                 Menu {
                     Button("待整理") { store.organize(item, into: nil) }
-                    ForEach(store.snapshot.collections) { collection in
-                        Button(collection.name) { store.organize(item, into: collection.id) }
-                    }
+                    collectionMenuButtons(store) { id in store.organize(item, into: id) }
                     Divider()
-                    Button("新建目录…") { store.showNewCollection = true }
+                    Button("新建目录…") { store.beginNewCollection() }
                 } label: { Text(store.collectionName(item.collectionID)).font(.system(size: 11)) }
                 .menuStyle(.borderlessButton).fixedSize()
                 Spacer()
@@ -504,9 +502,7 @@ private struct MultiSelectionDetail: View {
                 }
                 Menu {
                     Button("待整理") { store.organize(store.selection, into: nil) }
-                    ForEach(store.snapshot.collections) { collection in
-                        Button(collection.name) { store.organize(store.selection, into: collection.id) }
-                    }
+                    collectionMenuButtons(store) { id in store.organize(store.selection, into: id) }
                 } label: {
                     Label("整理到", systemImage: "folder")
                 }

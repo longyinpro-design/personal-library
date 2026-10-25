@@ -66,14 +66,19 @@ struct CollectionSheet: View {
     @FocusState private var focused: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Label("新建目录", systemImage: "folder.badge.plus").font(.title3.weight(.semibold))
-            Text("按项目或主题整理资料，例如「工作项目」「生活记录」。")
+            Label(store.newCollectionParentID == nil ? "新建目录" : "新建子目录", systemImage: "folder.badge.plus")
+                .font(.title3.weight(.semibold))
+            Text(store.newCollectionParentID.map { "会放在「\(store.collectionPath($0))」下面。" }
+                 ?? "按项目或主题整理资料，例如「工作项目」「生活记录」。")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             TextField("目录名称", text: $name).textFieldStyle(.roundedBorder).focused($focused)
             if let failure { Text(failure).foregroundStyle(.red).font(.system(size: 12)) }
             HStack {
                 Spacer()
-                Button("取消") { store.showNewCollection = false }.keyboardShortcut(.cancelAction).disabled(saving)
+                Button("取消") {
+                    store.showNewCollection = false
+                    store.newCollectionParentID = nil
+                }.keyboardShortcut(.cancelAction).disabled(saving)
                 Button("创建") {
                     saving = true
                     Task {

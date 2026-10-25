@@ -1,12 +1,17 @@
-import SwiftUI
 import LibraryCore
+import SwiftUI
 
 struct SidebarView: View {
     @ObservedObject var store: LibraryStore
-    @State private var renaming: LibraryTag?
+    @State private var renaming: RenameTarget?
     @State private var renameText = ""
     private var selection: Binding<LibraryScope?> {
         Binding(get: { store.scope }, set: { if let target = $0 { store.navigate(target) } })
+    }
+
+    private enum RenameTarget: Equatable {
+        case tag(LibraryTag)
+        case collection(LibraryCollection)
     }
 
     var body: some View {
@@ -23,10 +28,10 @@ struct SidebarView: View {
                 row("整理记录", symbol: "clock.arrow.circlepath", scope: .history)
             }
             Section("我的目录") {
-                ForEach(store.snapshot.collections) { collection in
-                    row(collection.name, symbol: "folder", scope: .collection(collection.id))
+                ForEach(visibleCollections) { row in
+                    collectionRow(row)
                 }
-                Button { store.showNewCollection = true } label: {
+                Button { store.beginNewCollection() } label: {
                     Label("新建目录…", systemImage: "folder.badge.plus").foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain).disabled(!store.ready)
@@ -45,16 +50,13 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .alert("重命名标签", isPresented: Binding(get: { renaming != nil },
+        .alert(renameTitle, isPresented: Binding(get: { renaming != nil },
                                                  set: { if !$0 { renaming = nil } })) {
-            TextField("标签名称", text: $renameText)
-            Button("重命名") {
-                if let tag = renaming { store.renameTag(tag, to: renameText) }
-                renaming = nil
-            }
+            TextField("名称", text: $renameText)
+            Button("重命名") { commitRename() }
             Button("取消", role: .cancel) { renaming = nil }
         } message: {
-            Text("资料和标签的关联会一起改名。")
+            Text(renameMessage)
         }
         .navigationTitle("个人资料库")
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -68,6 +70,92 @@ struct SidebarView: View {
         }
     }
 
+    private var renameTitle: String {
+        switch renaming {
+        case .tag: return "重命名标签"
+        case .collection: return "重命名目录"
+        case nil: return "重命名"
+        }
+    }
+
+    private var renameMessage: String {
+        switch renaming {
+        case .tag: return "资料和标签的关联会一起改名。"
+        case .collection: return "只改名字，里面的资料和子目录都留在原处。"
+        case nil: return ""
+        }
+    }
+
+    private func commitRename() {
+        switch renaming {
+        case .tag(let tag):
+            store.renameTag(tag, to: renameText)
+        case .collection(let collection):
+            store.renameCollection(collection, to: renameText)
+        case nil:
+            break
+        }
+        renaming = nil
+    }
+
+    // MARK: - Folders
+
+    /// Depth-first folders with collapsed subtrees left out.
+    private var visibleCollections: [LibraryStore.CollectionRow] {
+        var rows: [LibraryStore.CollectionRow] = []
+        func walk(_ parentID: String?, depth: Int) {
+            for row in store.collectionRows where row.parentID == parentID {
+                rows.append(LibraryStore.CollectionRow(collection: row.collection, depth: depth))
+                if store.expandedCollections.contains(row.id) {
+                    walk(row.id, depth: depth + 1)
+                }
+            }
+        }
+        walk(nil, depth: 0)
+        return rows
+    }
+
+    private func childCount(of id: String) -> Int {
+        store.snapshot.collections.filter { $0.parentID == id }.count
+    }
+
+    private func collectionRow(_ row: LibraryStore.CollectionRow) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .rotationEffect(.degrees(store.expandedCollections.contains(row.id) ? 90 : 0))
+                .foregroundStyle(.secondary)
+                .opacity(childCount(of: row.id) > 0 ? 1 : 0)
+                .frame(width: 10)
+                .contentShape(Rectangle())
+                .onTapGesture { store.toggleCollection(row.id) }
+            Label(row.name, systemImage: "folder")
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, CGFloat(row.depth) * 14)
+        .tag(LibraryScope.collection(row.collection.id))
+        .contextMenu {
+            Button("新建子目录…") { store.beginNewCollection(in: row.collection.id) }
+                .disabled(row.depth + 1 >= 5)
+            Button("重命名…") {
+                renameText = row.name
+                renaming = .collection(row.collection)
+            }
+            Menu("移到…") {
+                Button("顶层") { store.moveCollection(row.collection, to: nil) }
+                    .disabled(row.parentID == nil)
+                Divider()
+                ForEach(movableTargets(in: store, excluding: row.collection)) { target in
+                    Button(String(repeating: "    ", count: target.depth) + target.name) {
+                        store.moveCollection(row.collection, to: target.id)
+                    }
+                }
+            }
+            Divider()
+            Button("删除目录", role: .destructive) { store.deleteCollection(row.collection) }
+        }
+    }
+
     private func tagRow(_ tag: LibraryTag) -> some View {
         HStack {
             Label("#" + tag.name, systemImage: "number")
@@ -78,7 +166,7 @@ struct SidebarView: View {
         .contextMenu {
             Button("重命名…") {
                 renameText = tag.name
-                renaming = tag
+                renaming = .tag(tag)
             }
             Button("删除标签", role: .destructive) { store.deleteTag(tag) }
         }
