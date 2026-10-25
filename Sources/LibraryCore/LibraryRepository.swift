@@ -23,17 +23,24 @@ public actor LibraryRepository {
         self.database = try Database(url: root.appendingPathComponent("library.sqlite"))
     }
 
+    /// Cheap change token for `snapshot()`: if it has not moved, the next
+    /// snapshot would return the same rows.
+    public func changeCount() throws -> Int64 {
+        database.totalChanges
+    }
+
     public func snapshot() throws -> LibrarySnapshot {
         var snapshot = LibrarySnapshot()
         let imageRows = Dictionary(grouping: try database.rows("SELECT * FROM markdown_images ORDER BY reference"), by: { $0["item_id"]! })
         let sourceRows = Dictionary(grouping: try database.rows("SELECT * FROM item_sources ORDER BY path"), by: { $0["item_id"]! })
         let tagRows = Dictionary(grouping: try database.rows("SELECT item_tags.item_id AS item_id, tags.name AS name FROM item_tags JOIN tags ON tags.id = item_tags.tag_id ORDER BY tags.name COLLATE NOCASE"), by: { $0["item_id"]! })
+        // No `body` here on purpose: the list only needs these three values,
+        // and they are stored next to the row (schema version 12) instead of
+        // being recomputed from the body on every refresh.
         let columns = """
-            id, title, kind, relative_path, substr(body, 1, 240) AS preview,
+            id, title, kind, relative_path, preview,
                    extraction_note, byte_count, created_at, updated_at, collection_id,
-                   favorite, image_base_path, deleted_at,
-                   length(trim(body)) > 0 AS has_body,
-                   instr(body, '](http') > 0 OR instr(body, '<http') > 0 AS has_links
+                   favorite, image_base_path, deleted_at, has_body, has_links
             """
         snapshot.items = try database.rows("SELECT \(columns) FROM items WHERE deleted_at IS NULL ORDER BY updated_at DESC, id")
             .map { try item(from: $0, imageRows: imageRows, sourceRows: sourceRows, tagRows: tagRows) }
@@ -407,6 +414,25 @@ public actor LibraryRepository {
             throw LibraryPackageError.missingItem
         }
         return try item(from: row, imageRows: imageRows, sourceRows: sourceRows, tagRows: tagRows)
+    }
+
+    /// Fills `preview`/`has_body`/`has_links` for rows written before those
+    /// columns existed. Bounded so the first launch after an upgrade does not
+    /// wait on a full rewrite of every body.
+    @discardableResult
+    public func backfillDerived(limit: Int = 200) throws -> Int {
+        let pending = try database.rows(
+            "SELECT count(*) AS n FROM items WHERE preview IS NULL LIMIT 1").first?["n"].flatMap(Int.init) ?? 0
+        guard pending > 0 else { return 0 }
+        try database.execute("""
+            UPDATE items SET preview = substr(body, 1, 240),
+                             has_body = (length(trim(body)) > 0),
+                             has_links = (instr(body, '](http') > 0 OR instr(body, '<http') > 0)
+            WHERE id IN (SELECT id FROM items WHERE preview IS NULL LIMIT ?)
+            """, [String(limit)])
+        let left = try database.rows(
+            "SELECT count(*) AS n FROM items WHERE preview IS NULL LIMIT 1").first?["n"].flatMap(Int.init) ?? 0
+        return max(0, pending - left)
     }
 
     /// Gives items imported before fingerprints existed one, so they take part in

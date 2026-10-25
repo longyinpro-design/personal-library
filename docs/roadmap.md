@@ -137,11 +137,11 @@ README 说明重复导入「保留为独立副本」，但没有任何提示，�
 
 ## 工程优化
 
-- **全量快照**：每次变更都 `SELECT` 全表加全部配图与来源（[LibraryRepository.swift:18](../Sources/LibraryCore/LibraryRepository.swift#L18)），`reload()` 被 8 处调用（[LibraryStore.swift:633](../Sources/PersonalLibrary/Stores/LibraryStore.swift#L633)）。改为按 id 增量 upsert，列表分页或虚拟化。
+- **全量快照**：**已交付（#40）**。快照不再读 `body`——`preview`、`has_body`、`has_links` 物化成列并由触发器维护；`reload()` 按 `sqlite3_total_changes` 跳过无变更的重复刷新。1 万份 × 2 万字正文（588 MB）实测整次快照 610.8 → 124.1 ms。列表分页与虚拟化留待下一步（#42）。
 - **无谓的大字符串拷贝**：搜索结果把整段 `body` 放进 `LibraryItem` 再清空（[LibraryRepository.swift:427](../Sources/LibraryCore/LibraryRepository.swift#L427)），只需 `substr(body, 1, 240)`。
 - **FTS 参数**：`detail=none` + trigram 不支持短语与前缀（[Database.swift:55](../Sources/LibraryCore/Database.swift#L55)），按实际库大小评估 `detail=column` 的索引成本。
 - **迁移**：`user_version` 为 if 链单条执行（[Database.swift:22](../Sources/LibraryCore/Database.swift#L22)），包进事务并抽出 schema 版本常量。
-- **性能基准**：1 千 / 1 万条合成库的导入、搜索、滚动基准，CI 设阈值。
+- **性能基准**：**已交付（#40）**。`script/snapshot-benchmark.py` 生成 1 千 / 1 万条合成库并逐条语句计时；`PERSONAL_LIBRARY_BENCHMARK=1` 时 `SnapshotPerformanceTests` 在测试里复算同一组数字。
 - **仓库治理**：ISSUE / PR 模板、CONTRIBUTING、SECURITY、CHANGELOG、路线图 Projects。
 - **国际化**：界面文案抽到 String Catalog，补英文 README。这是 GitHub 增长的基本盘。
 
