@@ -92,6 +92,8 @@ final class LibraryStore: ObservableObject {
     @Published var ready = false
     @Published var focusSearch = false
     @Published var showNewCollection = false
+    @Published var newCollectionParentID: String?
+    @Published var expandedCollections: Set<String> = []
     @Published private(set) var backups: [LibraryBackup] = []
     @Published private(set) var isBackingUp = false
     /// Items still waiting for the on-device text recognizer.
@@ -297,7 +299,9 @@ final class LibraryStore: ObservableObject {
     var totalBytes: Int64 { snapshot.items.reduce(0) { $0 + $1.byteCount } }
 
     func collectionName(_ id: String?) -> String {
-        snapshot.collections.first { $0.id == id }?.name ?? "待整理"
+        guard let id else { return "待整理" }
+        guard snapshot.collections.contains(where: { $0.id == id }) else { return "待整理" }
+        return collectionPath(id)
     }
 
     func load() async {
@@ -962,10 +966,108 @@ final class LibraryStore: ObservableObject {
 
     func createCollection(_ name: String) async throws {
         guard let repository else { throw LibraryError.message("资料库尚未就绪") }
-        let id = try await repository.createCollection(name: name)
+        let parentID = newCollectionParentID
+        let id = try await repository.createCollection(name: name, parentID: parentID)
         try await reload()
+        if let parentID { expandedCollections.insert(parentID) }
         navigate(.collection(id))
         showNewCollection = false
+        newCollectionParentID = nil
+    }
+
+    /// Opens the new-folder sheet, optionally nested under `parentID`.
+    func beginNewCollection(in parentID: String? = nil) {
+        newCollectionParentID = parentID
+        showNewCollection = true
+    }
+
+    func renameCollection(_ collection: LibraryCollection, to name: String) -> Task<Void, Never>? {
+        guard ready, let repository else { return nil }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != collection.name else { return nil }
+        return Task {
+            do {
+                try await repository.renameCollection(id: collection.id, to: trimmed)
+                if case .collection = scope { suppressSearch = true }
+                try await reload()
+                status = "目录已改名为「\(trimmed)」"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    func deleteCollection(_ collection: LibraryCollection) -> Task<Void, Never>? {
+        guard ready, let repository else { return nil }
+        return Task {
+            do {
+                try await repository.deleteCollection(id: collection.id)
+                if case .collection(let id) = scope, id == collection.id { navigate(.all) }
+                expandedCollections.remove(collection.id)
+                suppressSearch = true
+                try await reload()
+                status = "已删除目录「\(collection.name)」，资料回到待整理"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    func moveCollection(_ collection: LibraryCollection, to parentID: String?) -> Task<Void, Never>? {
+        guard ready, let repository else { return nil }
+        return Task {
+            do {
+                try await repository.moveCollection(id: collection.id, to: parentID)
+                if let parentID { expandedCollections.insert(parentID) }
+                suppressSearch = true
+                try await reload()
+                status = "已移动「\(collection.name)」"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    /// Depth-first folder order: parents before their children, siblings by name.
+    var collectionRows: [CollectionRow] {
+        let byParent = Dictionary(grouping: snapshot.collections) { $0.parentID }
+        var rows: [CollectionRow] = []
+        var seen = Set<String>()
+        func append(_ parent: String?, depth: Int) {
+            let children = (byParent[parent] ?? []).sorted {
+                $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+            for child in children where !seen.contains(child.id) {
+                seen.insert(child.id)
+                rows.append(CollectionRow(collection: child, depth: depth))
+                append(child.id, depth: depth + 1)
+            }
+        }
+        append(nil, depth: 0)
+        return rows
+    }
+
+    /// `2025 › 合同`, or the folder's own name at the top level.
+    func collectionPath(_ id: String) -> String {
+        var names: [String] = []
+        var cursor: String? = id
+        var guardCount = 0
+        while let current = cursor, guardCount < 16 {
+            guardCount += 1
+            guard let collection = snapshot.collections.first(where: { $0.id == current }) else { break }
+            names.insert(collection.name, at: 0)
+            cursor = collection.parentID
+        }
+        return names.joined(separator: " › ")
+    }
+
+    /// Indented names for the "file into folder" menus.
+    var collectionMenuRows: [CollectionRow] {
+        collectionRows
+    }
+
+    func toggleCollection(_ id: String) {
+        if expandedCollections.contains(id) { expandedCollections.remove(id) } else { expandedCollections.insert(id) }
     }
 
     @discardableResult
@@ -1009,6 +1111,15 @@ final class LibraryStore: ObservableObject {
     struct TagEditorRequest: Identifiable, Equatable {
         let id = UUID()
         let itemIDs: [String]
+    }
+
+    /// One folder in the sidebar tree, with its indentation level.
+    struct CollectionRow: Identifiable, Equatable {
+        var collection: LibraryCollection
+        var depth: Int
+        var id: String { collection.id }
+        var name: String { collection.name }
+        var parentID: String? { collection.parentID }
     }
 
     @Published var tagEditorRequest: TagEditorRequest?

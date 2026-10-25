@@ -45,9 +45,7 @@ struct ItemListView: View {
                 }
                 Menu("整理到") {
                     Button("待整理") { store.organize(ids, into: nil) }
-                    ForEach(store.snapshot.collections) { collection in
-                        Button(collection.name) { store.organize(ids, into: collection.id) }
-                    }
+                    collectionMenuButtons(store) { id in store.organize(ids, into: id) }
                 }
                 Button("标签…") { store.beginTagEditing(ids: ids) }
                 Divider()
@@ -454,9 +452,7 @@ struct ItemListView: View {
             }
             Menu {
                 Button("待整理") { store.organize(store.selection, into: nil) }
-                ForEach(store.snapshot.collections) { collection in
-                    Button(collection.name) { store.organize(store.selection, into: collection.id) }
-                }
+                collectionMenuButtons(store) { id in store.organize(store.selection, into: id) }
             } label: {
                 Label("整理到", systemImage: "folder")
             }

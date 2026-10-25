@@ -5,7 +5,7 @@ import Foundation
 final class Database {
     /// Current schema version, written to `PRAGMA user_version`. Backups record
     /// theirs, so this is the one place that knows what a build can read.
-    static let schemaVersion = 10
+    static let schemaVersion = 11
 
     private var handle: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -104,6 +104,15 @@ final class Database {
                try !hasColumn("reading_position", in: "items") {
                 try execute("ALTER TABLE items ADD COLUMN reading_position TEXT")
             }
+            // Version 11 nests collections. `name` stays globally unique (the
+            // table is not rebuilt), so a child cannot repeat a name used
+            // anywhere else; depth is capped by the validation in the
+            // repository rather than by the schema.
+            if ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"].contains(version),
+               try !hasColumn("parent_id", in: "collections") {
+                try execute("ALTER TABLE collections ADD COLUMN parent_id TEXT")
+            }
+            try execute("CREATE INDEX IF NOT EXISTS collections_parent ON collections(parent_id)")
             try execute("""
                 CREATE TABLE IF NOT EXISTS markdown_images (
                     item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,

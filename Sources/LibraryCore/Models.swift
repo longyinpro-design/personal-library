@@ -72,13 +72,17 @@ public struct LibraryTag: Identifiable, Sendable, Hashable {
     }
 }
 
-public struct LibraryCollection: Identifiable, Sendable {
+public struct LibraryCollection: Identifiable, Sendable, Equatable {
     public let id: String
     public let name: String
+    /// Nil for a top-level folder. Nesting is one level of depth per link;
+    /// cycles are rejected when a folder moves.
+    public let parentID: String?
 
-    public init(id: String, name: String) {
+    public init(id: String, name: String, parentID: String? = nil) {
         self.id = id
         self.name = name
+        self.parentID = parentID
     }
 }
 

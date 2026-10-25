@@ -48,7 +48,7 @@ public actor LibraryRepository {
             ORDER BY tags.name COLLATE NOCASE
             """).map { LibraryTag(id: $0["id"]!, name: $0["name"]!, count: Int($0["count"] ?? "") ?? 0) }
         snapshot.collections = try database.rows("SELECT * FROM collections ORDER BY name COLLATE NOCASE").map {
-            LibraryCollection(id: $0["id"]!, name: $0["name"]!)
+            LibraryCollection(id: $0["id"]!, name: $0["name"]!, parentID: $0["parent_id"])
         }
         snapshot.activities = try database.rows("SELECT * FROM activities ORDER BY date DESC LIMIT 200").map {
             LibraryActivity(id: $0["id"]!, message: $0["message"]!, date: Date(timeIntervalSince1970: Double($0["date"]!)!))
@@ -596,16 +596,110 @@ public actor LibraryRepository {
         return itemID
     }
 
-    public func createCollection(name: String) throws -> String {
+    public func createCollection(name: String, parentID: String? = nil) throws -> String {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 80 else { throw LibraryError.message("目录名需为 1 至 80 个字符") }
         let id = UUID().uuidString
         try database.transaction {
+            if let parentID {
+                guard try !database.rows("SELECT id FROM collections WHERE id = ?", [parentID]).isEmpty else {
+                    throw LibraryError.message("上级目录不存在")
+                }
+                guard try depth(of: parentID) + 1 <= Self.maximumCollectionDepth else {
+                    throw LibraryError.message("目录最多嵌套 \(Self.maximumCollectionDepth) 层")
+                }
+            }
             guard try database.rows("SELECT id FROM collections WHERE name = ? COLLATE NOCASE", [name]).isEmpty else { throw LibraryError.message("已有同名目录") }
-            try database.execute("INSERT INTO collections (id,name) VALUES (?,?)", [id, name])
+            try database.execute("INSERT INTO collections (id,name,parent_id) VALUES (?,?,?)", [id, name, parentID])
             try record("新建目录「\(name)」")
         }
         return id
+    }
+
+    public func renameCollection(id: String, to name: String) throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 80 else { throw LibraryError.message("目录名需为 1 至 80 个字符") }
+        try database.transaction {
+            guard let row = try database.rows("SELECT name FROM collections WHERE id = ?", [id]).first else {
+                throw LibraryError.message("目录不存在")
+            }
+            guard (row["name"] ?? "").compare(name, options: .caseInsensitive) != .orderedSame else { return }
+            guard try database.rows("SELECT id FROM collections WHERE name = ? COLLATE NOCASE AND id <> ?", [name, id]).isEmpty else {
+                throw LibraryError.message("已有同名目录")
+            }
+            try database.execute("UPDATE collections SET name = ? WHERE id = ?", [name, id])
+            try record("把目录「\(row["name"] ?? "")」改名为「\(name)」")
+        }
+    }
+
+    /// Re-parents a folder. Moving it under its own descendant would make a
+    /// loop, so the target's ancestors are checked first.
+    public func moveCollection(id: String, to parentID: String?) throws {
+        try database.transaction {
+            guard let row = try database.rows("SELECT name, parent_id FROM collections WHERE id = ?", [id]).first else {
+                throw LibraryError.message("目录不存在")
+            }
+            if let parentID {
+                guard parentID != id else { throw LibraryError.message("不能把目录移到它自己下面") }
+                guard try !database.rows("SELECT id FROM collections WHERE id = ?", [parentID]).isEmpty else {
+                    throw LibraryError.message("上级目录不存在")
+                }
+                var cursor: String? = parentID
+                while let current = cursor {
+                    guard current != id else { throw LibraryError.message("不能把目录移到它自己的子目录里") }
+                    cursor = try database.rows("SELECT parent_id FROM collections WHERE id = ?", [current]).first?["parent_id"]
+                }
+                guard try depth(of: parentID) + 1 + selfDepth(of: id) <= Self.maximumCollectionDepth else {
+                    throw LibraryError.message("目录最多嵌套 \(Self.maximumCollectionDepth) 层")
+                }
+            }
+            guard row["parent_id"] != parentID else { return }
+            try database.execute("UPDATE collections SET parent_id = ? WHERE id = ?", [parentID, id])
+            let target = try parentID.map { try database.rows("SELECT name FROM collections WHERE id = ?", [$0]).first?["name"] ?? "" } ?? ""
+            try record("把目录「\(row["name"] ?? "")」移到「\(target.isEmpty ? "顶层" : target)」")
+        }
+    }
+
+    /// Deletes a folder without touching the items inside it: its children
+    /// move up one level and the items fall back to "待整理".
+    public func deleteCollection(id: String) throws {
+        try database.transaction {
+            guard let row = try database.rows("SELECT name, parent_id FROM collections WHERE id = ?", [id]).first else {
+                throw LibraryError.message("目录不存在")
+            }
+            try database.execute("UPDATE items SET collection_id = NULL WHERE collection_id = ?", [id])
+            try database.execute("UPDATE collections SET parent_id = ? WHERE parent_id = ?", [row["parent_id"], id])
+            try database.execute("DELETE FROM collections WHERE id = ?", [id])
+            try record("删除目录「\(row["name"] ?? "")」")
+        }
+    }
+
+    /// Deepest allowed nesting, counted from a top-level folder as 1.
+    static let maximumCollectionDepth = 5
+
+    private func depth(of id: String) throws -> Int {
+        var level = 0
+        var cursor: String? = id
+        while let current = cursor {
+            level += 1
+            guard level <= Self.maximumCollectionDepth else { break }
+            cursor = try database.rows("SELECT parent_id FROM collections WHERE id = ?", [current]).first?["parent_id"]
+        }
+        return level
+    }
+
+    /// Height of the subtree rooted at `id`, so a move cannot push descendants
+    /// deeper than the limit.
+    private func selfDepth(of id: String) throws -> Int {
+        var level = 0
+        var frontier = [id]
+        while !frontier.isEmpty, level < Self.maximumCollectionDepth {
+            let placeholders = Self.placeholders(frontier.count)
+            frontier = try database.rows("SELECT id FROM collections WHERE parent_id IN (\(placeholders))", Self.optional(frontier))
+                .compactMap { $0["id"] }
+            level += 1
+        }
+        return level
     }
 
     public func setFavorite(id: String, value: Bool) throws {
